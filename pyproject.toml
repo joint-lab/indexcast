@@ -1,0 +1,36 @@
+[project]
+name = "indexcast-backend"
+version = "0.1.0"
+description = "IndexCast: Combine prediction market data into indices."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "dagster>=1.10.20",
+    "instructor>=1.8.3",
+    "openai>=1.86.0",
+    "pydantic>=2.11.7",
+    "requests>=2.32.4",
+    "ruff>=0.11.13",
+    "scikit-learn>=1.7.0",
+    "sqlmodel>=0.0.24",
+]
+
+[tool.black]
+line-length = 100
+include = '\.pyi?$'
+
+[tool.ruff]
+# Enable rules
+lint.select = ["E", "F", "B", "I", "N", "UP", "D", "T20", "S"]
+# Ignore specific rules
+lint.ignore = ["D203", "D212", "B008"]
+# Allow autofix for all enabled rules (when `--fix`) is provided.
+lint.fixable = ["ALL"]
+line-length = 100
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.flake8-quotes]
+docstring-quotes = "double"
+inline-quotes = "single"
