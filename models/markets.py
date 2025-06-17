@@ -33,6 +33,9 @@ class Market(SQLModel, table=True):
     closed_at: datetime | None = None
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
+    # Relationships
+    labels: list["MarketLabel"] = Relationship(back_populates="market")
+    scores: list["MarketRelevanceScore"] = Relationship(back_populates="market")
 
 # Market classifications
 class MarketLabelType(SQLModel, table=True):
@@ -57,3 +60,29 @@ class MarketLabel(SQLModel, table=True):
     # Relationships
     market: "Market" = Relationship(back_populates="labels")
     label_type: MarketLabelType = Relationship(back_populates="market_labels")
+
+
+# Market ranking
+class MarketRelevanceScoreType(SQLModel, table=True):
+    """Types of market relevance scores."""
+
+    __tablename__ = "market_relevance_score_types"
+
+    id: int = Field(default=None, primary_key=True)
+    score_name: str = Field(unique=True)
+
+    # Relationship back to market scores
+    market_scores: list["MarketRelevanceScore"] = Relationship(back_populates="score_type")
+
+class MarketRelevanceScore(SQLModel, table=True):
+    """Relevance scores assigned to markets by the ranker."""
+
+    __tablename__ = "market_relevance_scores"
+
+    market_id: str = Field(primary_key=True, foreign_key="markets.id")
+    score_type_id: int = Field(primary_key=True, foreign_key="market_relevance_score_types.id")
+    score_value: float
+
+    # Relationships
+    market: "Market" = Relationship(back_populates="scores")
+    score_type: MarketRelevanceScoreType = Relationship(back_populates="market_scores")
