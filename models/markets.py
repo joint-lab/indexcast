@@ -31,7 +31,10 @@ class Market(SQLModel, table=True):
     # timestamps
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     closed_at: datetime | None = None
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        sa_column_kwargs={"onupdate": lambda: datetime.now(UTC)}
+    )
 
     # Relationships
     labels: list["MarketLabel"] = Relationship(back_populates="market")
