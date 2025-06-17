@@ -14,16 +14,8 @@ from pydantic import BaseModel, Field, field_validator
 class MarketRelevance(BaseModel):
     """Structured response model for market relevance scoring."""
 
-    reasoning: str = Field(description="Reasoning for the assigned relevance score.")
+    reasoning: str = Field(ge=0, le=1, description="Reasoning for the assigned relevance score.")
     relevance_score: float = Field(description="Score from 0 to 1 indicating market relevance.")
-
-    @field_validator("relevance_score", mode="after")
-    @classmethod
-    def validate_relevance_score(cls, relevance_score: float) -> float:
-        """Validate that the score is between 0 and 1."""
-        if not (0.0 <= relevance_score <= 1.0):
-            raise ValueError("Relevance score must be between 0 and 1.")
-        return relevance_score
 
 class DiseaseInformation(BaseModel):
     """Structured model for Disease information."""
