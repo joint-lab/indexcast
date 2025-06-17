@@ -8,7 +8,7 @@ Authors:
 
 import instructor
 from jinja2 import Environment, FileSystemLoader
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
 
 class MarketRelevance(BaseModel):
