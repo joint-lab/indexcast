@@ -7,9 +7,10 @@ Authors:
 """
 from datetime import UTC, datetime
 
-from sqlmodel import Field, SQLModel
+from sqlmodel import Field, Relationship, SQLModel
 
 
+# API data
 class Market(SQLModel, table=True):
     """Prediction market model."""
 
@@ -31,3 +32,28 @@ class Market(SQLModel, table=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     closed_at: datetime | None = None
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+# Market classifications
+class MarketLabelType(SQLModel, table=True):
+    """All possible label types for markets."""
+
+    __tablename__ = "market_label_types"
+
+    id: int = Field(default=None, primary_key=True)
+    label_name: str = Field(unique=True)  # renamed from tag_name
+
+    # Relationship back to markets that use this label
+    market_labels: list["MarketLabel"] = Relationship(back_populates="label_type")
+
+class MarketLabel(SQLModel, table=True):
+    """Junction table linking markets to their labels."""
+
+    __tablename__ = "market_labels"
+
+    market_id: str = Field(primary_key=True, foreign_key="markets.id")
+    label_type_id: int = Field(primary_key=True, foreign_key="market_label_types.id")
+
+    # Relationships
+    market: "Market" = Relationship(back_populates="labels")
+    label_type: MarketLabelType = Relationship(back_populates="market_labels")
