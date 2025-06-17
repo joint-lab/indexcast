@@ -15,7 +15,8 @@ class MarketRelevance(BaseModel):
     """Structured response model for market relevance scoring."""
 
     reasoning: str = Field(description="Reasoning for the assigned relevance score.")
-    relevance_score: float = Field(ge=0, le=1, description="Score from 0 to 1 indicating market relevance.")
+    relevance_score: float = Field(ge=0, le=1, description="Score from 0 to 1 indicating "
+                                                           "market relevance.")
 
 class DiseaseInformation(BaseModel):
     """Structured model for Disease information."""
