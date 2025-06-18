@@ -26,7 +26,7 @@ class Market(SQLModel, table=True):
     # trading summaries
     probability: float | None = None
     volume: float | None = Field(default=0.0)
-    is_resolved: bool = Field(default=False)
+    is_resolved: bool
     resolution: str | None = None
     # timestamps
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
@@ -39,6 +39,7 @@ class Market(SQLModel, table=True):
     comments: list["MarketComment"] = Relationship(back_populates="market")
     labels: list["MarketLabel"] = Relationship(back_populates="market")
     scores: list["MarketRelevanceScore"] = Relationship(back_populates="market")
+    bets: list["MarketBet"] = Relationship(back_populates="market")
 
 # Market classifications
 class MarketLabelType(SQLModel, table=True):
@@ -120,12 +121,58 @@ class MarketComment(SQLModel, table=True):
     commentor_position_prob: str | None = None
 
     # other info
-    is_api: int
+    is_api: bool
     reply_to_comment_id: str | None = None
     visibility: str
 
     # time stamp
     created_time: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     # Relationships
     market: "Market" = Relationship(back_populates="comments")
+
+# API data
+class MarketBet(SQLModel, table=True):
+    """Prediction market bet model."""
+
+    __tablename__ = "market_bets"
+
+    id: str = Field(primary_key=True)
+    user_id: str
+    contract_id: str
+    outcome: str
+    amount: float
+    order_amount: float
+    shares: float
+    prob_before: float
+    prob_after: float
+    limit_prob: float | None = None
+    is_filled: bool
+    is_cancelled: bool
+    created_time: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    loan_amount: float | None = None
+
+    # fees
+    platform_fee: float | None = None
+    liquidity_fee: float | None = None
+    creator_fee: float | None = None
+
+    fills: list["MarketFill"] = Relationship(back_populates="bet")
+    market: "Market" = Relationship(back_populates="bets")
+
+
+# API data
+class MarketFill(SQLModel, table=True):
+    """Prediction market fill model."""
+
+    __tablename__ = "market_fills"
+
+    id: str = Field(primary_key=True)
+    bet_id: str = Field(foreign_key="market_bets.id")
+    matched_bet_id: str | None = None
+    amount: float
+    shares: float
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    bet: "MarketBet" = Relationship(back_populates="fills")
