@@ -13,7 +13,7 @@ from models.markets import Market, MarketLabel, MarketLabelType
 
 
 @dg.asset(
-    required_resource_keys={"manifold_api_resource", "sqlite_db_resource"}
+    required_resource_keys={"database", "manifold_api"}
 )
 def markets(context: dg.AssetExecutionContext):
     """Fetch markets from the Manifold API and populate the Markets table in the DB."""
@@ -24,12 +24,12 @@ def markets(context: dg.AssetExecutionContext):
 
 @dg.asset(
     deps=[markets],
-    required_resource_keys={"sqlite_db_resource"},
+    required_resource_keys={"database"},
     description="Market labels table."
 )
-def label_h5n1_markets(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
+def market_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     """Update market labels when materialized."""
-    with context.resources.sqlite_db_resource() as engine:
+    with context.resources.database() as engine:
         # Select all markets from the database
         with Session(engine) as session:
             markets = session.exec(select(Market)).all()

@@ -513,6 +513,7 @@ dependencies = [
     { name = "ruff" },
     { name = "scikit-learn" },
     { name = "sqlmodel" },
+    { name = "urllib3" },
 ]
 
 [package.metadata]
@@ -526,6 +527,7 @@ requires-dist = [
     { name = "ruff", specifier = ">=0.11.13" },
     { name = "scikit-learn", specifier = ">=1.7.0" },
     { name = "sqlmodel", specifier = ">=0.0.24" },
+    { name = "urllib3", specifier = ">=2.4.0" },
 ]
 
 [[package]]
