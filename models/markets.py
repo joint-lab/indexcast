@@ -19,18 +19,34 @@ class Market(SQLModel, table=True):
     # identifiers
     id: str = Field(primary_key=True)
     creator_id: str
+    creator_username: str
+    creator_name: str
     url: str
+
     # content
     question: str
     description: str | None = None
+
     # trading summaries
-    probability: float | None = None
-    volume: float | None = Field(default=0.0)
+    probability: float | None = None  # multiple choice markets don't have a probability
+    volume: float = Field(default=0.0)
+    volume_24h: float = Field(default=0.0)
+    unique_bettor_count: int = Field(default=0)
     is_resolved: bool = Field(default=False)
     resolution: str | None = None
+
+    # financials
+    total_liquidity: float = Field(default=0.0)
+    outcome_type: str = Field(default=None)
+    mechanism: str = Field(default=None)
+
     # timestamps
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    closed_at: datetime | None = None
+    created_time: datetime
+    last_updated_time: datetime
+    closed_time: datetime | None = None  # posts and bountied questions don't have a close time
+    resolution_time: datetime | None = None
+
+    # internal timestamps
     updated_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC)
     )
