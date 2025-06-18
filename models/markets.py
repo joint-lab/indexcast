@@ -36,6 +36,7 @@ class Market(SQLModel, table=True):
     )
 
     # Relationships
+    comments: list["MarketComment"] = Relationship(back_populates="market")
     labels: list["MarketLabel"] = Relationship(back_populates="market")
     scores: list["MarketRelevanceScore"] = Relationship(back_populates="market")
 
@@ -88,3 +89,43 @@ class MarketRelevanceScore(SQLModel, table=True):
     # Relationships
     market: "Market" = Relationship(back_populates="scores")
     score_type: MarketRelevanceScoreType = Relationship(back_populates="market_scores")
+
+# API data 
+class MarketComment(SQLModel, table=True):
+    """Prediction market comment model."""
+
+    __tablename__ = "market_comments"
+
+    # identifiers
+    id: str = Field(primary_key=True)
+    market_id: str = Field(foreign_key="markets.id")
+
+    # contract info
+    contract_id: str | None = None
+    contract_question: str | None = None
+    contract_slug: str | None = None
+
+    # content
+    comment_type: str
+    content: str | None = None
+
+    # commentor info
+    user_avatar_url: str | None = None
+    user_id: str
+    user_name: str
+    user_username: str
+    commentor_position_answer_id: str
+    commentor_position_outcome: str
+    commentor_position_shares: str
+    commentor_position_prob: str | None = None
+
+    # other info
+    is_api: int
+    reply_to_comment_id: str | None = None
+    visibility: str
+
+    # time stamp
+    created_time: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    # Relationships
+    market: "Market" = Relationship(back_populates="comments")
