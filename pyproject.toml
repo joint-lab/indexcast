@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.16.1",
     "dagster>=1.10.20",
+    "dagster-webserver>=1.10.20",
     "instructor>=1.8.3",
     "openai>=1.86.0",
     "pydantic>=2.11.7",
@@ -39,3 +40,7 @@ inline-quotes = "single"
 
 [tool.ruff.lint.per-file-ignores]
 "migrations/versions/**/*" = ["ALL"]
+
+
+[tool.dagster]
+module_name = "pipelines.definitions"

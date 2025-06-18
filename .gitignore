@@ -177,3 +177,4 @@ pyrightconfig.json
 
 indexcast.db
 configuration.sh  # real configuration file, avoid commiting keys
+.tmp_dagster*
