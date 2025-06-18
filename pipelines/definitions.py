@@ -16,7 +16,7 @@ markets_assets = dg.load_assets_from_modules([markets])
 defs = dg.Definitions(
     assets=[*markets_assets],
     resources={
-        "database": sqlite_db_resource,
+        "database_engine": sqlite_db_resource,
         "manifold_client": manifold_api_resource
     }
 )

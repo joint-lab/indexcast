@@ -43,7 +43,7 @@ class Market(SQLModel, table=True):
     # timestamps
     created_time: datetime
     last_updated_timed: datetime
-    closed_time: datetime
+    closed_time: datetime | None = None  # posts and bountied questions don't have a close time
     resolution_time: datetime | None = None
 
     # internal timestamps

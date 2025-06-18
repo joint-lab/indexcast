@@ -8,11 +8,12 @@ Authors:
 import os
 
 import dagster as dg
-import sqlmodel
+from sqlalchemy.engine import Engine
+from sqlmodel import create_engine
 
 
 @dg.resource
-def sqlite_db_resource(context: dg.ResourceContext) -> sqlmodel.engine.Engine:
+def sqlite_db_resource(context: dg.InitResourceContext) -> Engine:
     """
     Create a resource for connecting to the SQLite database.
     
@@ -23,5 +24,5 @@ def sqlite_db_resource(context: dg.ResourceContext) -> sqlmodel.engine.Engine:
     db_path = os.getenv('SQLITE_DB_PATH', 'indexcast.db')
 
     # Connect to the SQLite DB
-    engine = sqlmodel.create_engine(f'sqlite:///{db_path}')
+    engine = create_engine(f'sqlite:///{db_path}')
     return engine

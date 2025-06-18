@@ -176,5 +176,5 @@ pyrightconfig.json
 # End of https://www.toptal.com/developers/gitignore/api/python
 
 indexcast.db
-configuration.sh  # real configuration file, avoid commiting keys
+configuration.sh
 .tmp_dagster*
