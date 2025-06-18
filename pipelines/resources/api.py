@@ -93,18 +93,20 @@ class ManifoldClient:
         except requests.exceptions.RequestException as e:
             raise RuntimeError(f"Request to {url} failed: {e}") from e
 
-    def markets(self, limit=500, before=None) -> list:
+    def markets(self, limit=1000, before=None) -> list:
         """
         Fetch markets from the Manifold API.
 
         Args:
-            limit (int): Maximum number of markets to fetch.
+            limit (int): Number of markets to fetch. Maximum is 1000.
             before (str, optional): Fetch markets created before this id.
 
         """
         params = {"limit": limit}
         if before:
             params["before"] = before
+        if limit > 1000:
+            raise ValueError("Limit must be 1000 or less.")
         return self.execute_get_request("markets", params=params)
 
 

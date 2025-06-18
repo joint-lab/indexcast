@@ -5,6 +5,8 @@ Authors:
 - JGY <jyoung22@uvm.edu>
 - Erik Arnold <ewarnold@uvm.edu>
 """
+from datetime import UTC, datetime, timedelta
+
 import dagster as dg
 from sqlmodel import Session, select
 
@@ -12,18 +14,101 @@ from ml.classification import h5n1_classifier
 from models.markets import Market, MarketLabel, MarketLabelType
 
 
-@dg.asset(
-    required_resource_keys={"database", "manifold_api"}
-)
-def markets(context: dg.AssetExecutionContext):
-    """Fetch markets from the Manifold API and populate the Markets table in the DB."""
-    markets_data = context.resources.manifold_api_resource.fetch_markets()  # Stub: returns []
-    # TODO: Insert markets_data into the Markets table using db
-    context.log.info(f"Fetched {len(markets_data)} markets (stub)")
-    return markets_data
+def _prepare_market(market_data: dict) -> Market:
+    """Prepare a Market object from raw API data."""
+    # Convert timestamps
+    created_time = datetime.fromtimestamp(market_data["createdTime"] / 1000, UTC)
+    closed_time = (
+        datetime.fromtimestamp(market_data["closeTime"] / 1000, UTC)
+        if market_data.get("closeTime") else None
+    )
+    resolution_time = (
+        datetime.fromtimestamp(market_data["resolutionTime"] / 1000, UTC)
+        if market_data.get("resolutionTime") else None
+    )
+    last_updated_timed = (
+        datetime.fromtimestamp(market_data["lastUpdatedTime"] / 1000, UTC)
+        if market_data.get("lastUpdatedTime") else created_time
+    )
+    return Market(
+        id=market_data["id"],
+        creator_id=market_data.get("creatorId", ""),
+        creator_username=market_data.get("creatorUsername", ""),
+        creator_name=market_data.get("creatorName", ""),
+        url=market_data["url"],
+        question=market_data["question"],
+        description=market_data.get("description"),
+        probability=market_data.get("probability"),
+        volume=market_data.get("volume", 0.0),
+        volume_24h=market_data.get("volume24Hours", 0.0),
+        unique_bettor_count=market_data.get("uniqueBettorCount", 0),
+        is_resolved=market_data.get("isResolved", False),
+        resolution=market_data.get("resolution"),
+        total_liquidity=market_data.get("totalLiquidity", 0.0),
+        outcome_type=market_data.get("outcomeType"),
+        mechanism=market_data.get("mechanism"),
+        created_time=created_time,
+        last_updated_timed=last_updated_timed,
+        closed_time=closed_time,
+        resolution_time=resolution_time,
+        updated_at=datetime.now(UTC),
+    )
+
 
 @dg.asset(
-    deps=[markets],
+    required_resource_keys={"database", "manifold_api_resource"},
+    description="Markets table.",
+)
+def manifold_markets(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
+    """
+    Fetch markets from the Manifold API and populate the Markets table in the DB.
+
+    This asset fetches markets created in the last 24 hours, checks if they already exist
+    in the database, and inserts new markets. It also respects the Manifold API rate limits
+    and handles pagination.
+    """
+    # Variables for tracking state
+    now = datetime.now(UTC)
+    since = now - timedelta(days=1)
+    new_markets = []
+    exhausted = False
+    before = None
+
+    # Manifold API client
+    manifold_client = context.resources.manifold_api_resource
+
+    # Fetch markets in batches
+    with Session(context.resources.database()) as session:
+        while True:
+            batch = manifold_client.markets(limit=1000, before=before)
+            if not batch:
+                break
+            for m in batch:
+                market = _prepare_market(m)
+                if market.created_time < since: # Skip markets older than 24 hours
+                    exhausted = True
+                    break
+                if session.get(Market, m["id"]): # Skip markets that already exist
+                    exhausted = True
+                    break
+                session.add(market)
+                new_markets.append(market)
+            session.commit()
+            if exhausted or len(batch) < 1000:
+                break
+            before = batch[-1]["id"]
+    context.log.info(
+        f"Inserted {len(new_markets)} new markets from Manifold (fetched {len(new_markets)} total)"
+    )
+    return dg.MaterializeResult(
+        metadata={
+            "num_markets_inserted": dg.MetadataValue.int(len(new_markets)),
+        }
+    )
+
+
+@dg.asset(
+    deps=[manifold_markets],
     required_resource_keys={"database"},
     description="Market labels table."
 )
@@ -45,7 +130,7 @@ def market_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
             classification_results.append(
                 (m.id, h5n1_classifier(m))
             )
-        num_markets_h5n1 = sum([1 for _, is_h5n1 in classification_results if is_h5n1])
+        num_markets_h5n1 = sum(1 for _, is_h5n1 in classification_results if is_h5n1)
 
         # Obtain id of h5n1 label type
         with Session(engine) as session:
