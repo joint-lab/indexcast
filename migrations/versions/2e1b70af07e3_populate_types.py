@@ -1,8 +1,8 @@
-"""populate types tables
+"""populate_types
 
-Revision ID: b587c9ef28bd
-Revises: f2a895a51c71
-Create Date: 2025-06-17 13:56:52.972310
+Revision ID: 2e1b70af07e3
+Revises: 3a7de0d36b89
+Create Date: 2025-06-18 16:12:42.318069
 
 """
 from typing import Sequence, Union
@@ -14,11 +14,10 @@ import sqlmodel
 
 
 # revision identifiers, used by Alembic.
-revision: str = 'b587c9ef28bd'
-down_revision: Union[str, None] = 'f2a895a51c71'
+revision: str = '2e1b70af07e3'
+down_revision: Union[str, None] = '3a7de0d36b89'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
-
 
 
 def upgrade() -> None:
@@ -55,3 +54,4 @@ def downgrade() -> None:
             'index_question_relevance'
         )
     """)
+

@@ -17,3 +17,10 @@ git@github.com:joint-lab/indexcast-backend.git
 cd indexcast-backend
 uv sync
 ```
+
+To setup environment variables, copy `example_configuration.sh` to `configuration.sh` and fill in the values, then export them:
+```bash
+cp example_configuration.sh configuration.sh
+nano configuration.sh
+source configuration.sh
+```
