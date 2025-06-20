@@ -100,9 +100,9 @@ class MarketBet(SQLModel, table=True):
 
     # identifiers
     id: str = Field(primary_key=True)
-    contract_id: str
+    contract_id: str = Field(foreign_key="markets.id")
     user_id: str
-    bet_groud_id: str | None = None
+    bet_group_id: str | None = None
 
     # bet info
     outcome: str

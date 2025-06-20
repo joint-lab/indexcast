@@ -8,14 +8,14 @@ Authors:
 import dagster as dg
 
 from pipelines.assets import markets
+from pipelines.jobs.markets import update_markets_job, update_markets_schedule
 from pipelines.resources.api import manifold_api_resource
 from pipelines.resources.db import sqlite_db_resource
 
 markets_assets = dg.load_assets_from_modules([markets])
-market_job = dg.define_asset_job(
-            name="update_markets_job",
-            selection="manifold_markets+"
-)
+
+# Collect all jobs from update_markets module that end with '_job'
+jobs = [getattr(markets, name) for name in dir(markets) if name.endswith('_job')]
 
 defs = dg.Definitions(
     assets=[*markets_assets],
@@ -23,5 +23,6 @@ defs = dg.Definitions(
         "database_engine": sqlite_db_resource,
         "manifold_client": manifold_api_resource
     },
-    jobs=[market_job]
+    jobs=[update_markets_job],
+    schedules=[update_markets_schedule]
 )
