@@ -69,6 +69,8 @@ def manifold_markets(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     """
     new_markets = []
     before = None
+    total_fetched = 0
+    batch_num = 0
 
     # Manifold API client
     manifold_client = context.resources.manifold_client
@@ -77,22 +79,38 @@ def manifold_markets(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     with Session(context.resources.database_engine) as session:
         stop_fetching = False
         while not stop_fetching:
+            batch_num += 1
             batch = manifold_client.markets(limit=1000, before=before)
+            batch_size = len(batch) if batch else 0
+            total_fetched += batch_size
+            context.log.debug(
+                f"Fetched batch {batch_num}: {batch_size} markets "
+                f"(total fetched: {total_fetched})"
+            )
             if not batch:
                 break
-            for m in batch:
+            for i, m in enumerate(batch):
                 if session.get(Market, m["id"]):  # Stop if market already exists
+                    context.log.debug(f"Market {m['id']} already exists in DB. Stopping fetch.")
                     stop_fetching = True
                     break
                 market = _prepare_market(m)
                 session.add(market)
                 new_markets.append(market)
+                if (i + 1) % 100 == 0:
+                    context.log.debug(
+                        f"Processed {i + 1} markets in current batch."
+                    )
             session.commit()
+            context.log.debug(
+                f"Committed batch {batch_num} to DB. "
+                f"New markets so far: {len(new_markets)}."
+            )
             if stop_fetching or len(batch) < 1000:
                 break
             before = batch[-1]["id"]
     context.log.info(
-        f"Inserted {len(new_markets)} new markets from Manifold (fetched {len(new_markets)} total)"
+        f"Inserted {len(new_markets)} new markets from Manifold (fetched {total_fetched} total)"
     )
     return dg.MaterializeResult(
         metadata={
