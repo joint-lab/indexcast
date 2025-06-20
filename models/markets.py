@@ -118,7 +118,7 @@ class MarketBet(SQLModel, table=True):
     limit_prob: float | None = None
 
     # status
-    visbility = str
+    visibility: str
     is_api: bool = False
     is_filled: bool = False
     is_cancelled: bool = False

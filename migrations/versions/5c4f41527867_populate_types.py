@@ -1,8 +1,8 @@
 """populate_types
 
-Revision ID: 2e1b70af07e3
-Revises: 3a7de0d36b89
-Create Date: 2025-06-18 16:12:42.318069
+Revision ID: 5c4f41527867
+Revises: 003e65779605
+Create Date: 2025-06-20 14:23:44.757394
 
 """
 from typing import Sequence, Union
@@ -14,8 +14,8 @@ import sqlmodel
 
 
 # revision identifiers, used by Alembic.
-revision: str = '2e1b70af07e3'
-down_revision: Union[str, None] = '3a7de0d36b89'
+revision: str = '5c4f41527867'
+down_revision: Union[str, None] = '003e65779605'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
