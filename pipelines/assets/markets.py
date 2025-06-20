@@ -124,7 +124,7 @@ def market_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
 
     # Apply classification logic
     classification_results = []
-    h5n1_classifier = H5N1Classifier
+    h5n1_classifier = H5N1Classifier()
     for m in markets:
         context.log.debug(f"Processing market: {m.id} - {m.question}")
         classification_results.append(
