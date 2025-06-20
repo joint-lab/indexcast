@@ -10,7 +10,9 @@ from datetime import UTC, datetime
 from sqlmodel import Field, Relationship, SQLModel
 
 
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # API data
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 class Market(SQLModel, table=True):
     """Prediction market model."""
 
@@ -52,10 +54,94 @@ class Market(SQLModel, table=True):
     )
 
     # Relationships
+    comments: list["MarketComment"] = Relationship(back_populates="market")
     labels: list["MarketLabel"] = Relationship(back_populates="market")
     scores: list["MarketRelevanceScore"] = Relationship(back_populates="market")
+    bets: list["MarketBet"] = Relationship(back_populates="market")
 
+
+class MarketComment(SQLModel, table=True):
+    """Prediction market comment model."""
+
+    __tablename__ = "market_comments"
+
+    # identifiers
+    id: str = Field(primary_key=True)
+    market_id: str = Field(foreign_key="markets.id")
+    user_id: str
+    reply_to_comment_id: str | None = None
+
+    # content
+    comment_type: str
+    is_api: bool
+    content: str
+
+    # other info
+    visibility: str
+    hidden: bool = False  # defaults to False, omitted in API response if False
+
+    # timestamps
+    created_time: datetime
+    hidden_time: datetime | None = None
+    edited_ime: datetime | None = None
+    
+    # internal timestamps
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC)
+    )
+
+    # Relationships
+    market: "Market" = Relationship(back_populates="comments")
+
+class MarketBet(SQLModel, table=True):
+    """Prediction market bet model."""
+
+    __tablename__ = "market_bets"
+
+    # identifiers
+    id: str = Field(primary_key=True)
+    contract_id: str
+    user_id: str
+    bet_groud_id: str | None = None
+
+    # bet info
+    outcome: str
+    amount: float
+    order_amount: float
+    loan_amount: float = 0
+    shares: float
+    fills: str | None = None  # fills json
+
+    # probabilities
+    prob_before: float
+    prob_after: float
+    limit_prob: float | None = None
+
+    # status
+    visbility = str
+    is_api: bool = False
+    is_filled: bool = False
+    is_cancelled: bool = False
+    is_redemption: bool = False
+
+    created_time: datetime
+    updated_time: datetime | None = None
+
+    # fees
+    platform_fee: float = 0
+    liquidity_fee: float = 0
+    creator_fee: float = 0
+
+    # internal timestamps
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC)
+    )
+
+    market: "Market" = Relationship(back_populates="bets")
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # Market classifications
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 class MarketLabelType(SQLModel, table=True):
     """All possible label types for markets."""
 
@@ -80,7 +166,9 @@ class MarketLabel(SQLModel, table=True):
     label_type: MarketLabelType = Relationship(back_populates="market_labels")
 
 
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # Market ranking
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 class MarketRelevanceScoreType(SQLModel, table=True):
     """Types of market relevance scores."""
 
