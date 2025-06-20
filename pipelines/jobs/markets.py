@@ -7,8 +7,7 @@ Authors:
 """
 import dagster as dg
 
-# Use the Definitions object to get the job and resources
-update_markets_job = dg.define_asset_job(
+update_markets_job = dg.define_asset_job(  # pylint: disable=E1111
     name="update_markets_job",
     selection="manifold_markets+"
 )
