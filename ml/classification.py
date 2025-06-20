@@ -5,20 +5,35 @@ Authors:
 - Erik Arnold <ernold@uvm.edu>
 - JGY <jyoung22@uvm.edu>
 """
-import numpy as np
+import joblib
+from sentence_transformers import SentenceTransformer
 
 from models.markets import Market
 
 
-def h5n1_classifier(market: Market) -> bool:
-    """
-    Decide whether a market is about H5N1.
+class H5N1Classifier:
+    """Classifier for H5N1 markets."""
 
-    Args:
-        market (Market): The market to classify.
-    
-    Returns:
-        bool: True if the market is about H5N1, False otherwise.
+    def __init__(self):
+        """Initialize H5N1Classifier."""
+        self.model = SentenceTransformer('Alibaba-NLP/gte-base-en-v1.5', trust_remote_code=True)
+        # classifier trained from the market_classification_summary.ipynb in notebooks directory
+        self.classifier = joblib.load("binary/classifier_pipeline.joblib")
 
-    """
-    return np.random.rand() < 0.2 # Placeholder logic, replace with actual classification logic
+
+    def predict(self, market: Market) -> bool:
+        """
+        Decide whether a market is about H5N1.
+
+        Args:
+            market (Market): The market to classify.
+
+        Returns:
+            bool: True if the market is about H5N1, False otherwise.
+
+        """
+        encoded_market = self.model.encode(market.question).reshape(1, -1)
+        if self.classifier.predict(encoded_market) == 1:
+            return True
+        else:
+            return False

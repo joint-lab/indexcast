@@ -14,6 +14,7 @@ dependencies = [
     "requests>=2.32.4",
     "ruff>=0.11.13",
     "scikit-learn>=1.7.0",
+    "sentence-transformers>=4.1.0",
     "sqlmodel>=0.0.24",
     "urllib3>=2.4.0",
 ]
@@ -40,6 +41,7 @@ inline-quotes = "single"
 
 [tool.ruff.lint.per-file-ignores]
 "migrations/versions/**/*" = ["ALL"]
+"notebooks/**/*" = ["ALL"]
 
 
 [tool.dagster]

@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 import dagster as dg
 from sqlmodel import Session, select
 
-from ml.classification import h5n1_classifier
+from ml.classification import H5N1Classifier
 from models.markets import Market, MarketLabel, MarketLabelType
 
 
@@ -118,10 +118,11 @@ def market_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
 
     # Apply classification logic
     classification_results = []
+    h5n1_classifier = H5N1Classifier()
     for m in markets:
         context.log.debug(f"Processing market: {m.id} - {m.question}")
         classification_results.append(
-            (m.id, h5n1_classifier(m))
+            (m.id, h5n1_classifier.predict(m))
         )
     num_markets_h5n1 = sum(1 for _, is_h5n1 in classification_results if is_h5n1)
 
