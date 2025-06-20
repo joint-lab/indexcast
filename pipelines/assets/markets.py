@@ -48,7 +48,7 @@ def _prepare_market(market_data: dict) -> Market:
         outcome_type=market_data.get("outcomeType"),
         mechanism=market_data.get("mechanism"),
         created_time=created_time,
-        last_updated_timed=last_updated_timed,
+        last_updated_time=last_updated_timed,
         closed_time=closed_time,
         resolution_time=resolution_time,
         updated_at=datetime.now(UTC),
