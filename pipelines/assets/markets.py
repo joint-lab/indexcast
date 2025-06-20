@@ -57,21 +57,17 @@ def _prepare_market(market_data: dict) -> Market:
 
 @dg.asset(
     required_resource_keys={"database_engine", "manifold_client"},
-    description="Markets table.",
+    description="Manifold markets table.",
 )
 def manifold_markets(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     """
-    Fetch markets from the Manifold API and populate the Markets table in the DB.
+    Fetch latest markets from the Manifold API and populate the Markets table.
 
-    This asset fetches markets created in the last 24 hours, checks if they already exist
+    This asset fetches all markets from the Manifold API, checks if they already exist
     in the database, and inserts new markets. It also respects the Manifold API rate limits
-    and handles pagination.
+    and handles pagination. Stops as soon as it encounters markets that already exists.
     """
-    # Variables for tracking state
-    now = datetime.now(UTC)
-    since = now - timedelta(days=1)
     new_markets = []
-    exhausted = False
     before = None
 
     # Manifold API client
@@ -79,22 +75,20 @@ def manifold_markets(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
 
     # Fetch markets in batches
     with Session(context.resources.database_engine) as session:
-        while True:
+        stop_fetching = False
+        while not stop_fetching:
             batch = manifold_client.markets(limit=1000, before=before)
             if not batch:
                 break
             for m in batch:
+                if session.get(Market, m["id"]):  # Stop if market already exists
+                    stop_fetching = True
+                    break
                 market = _prepare_market(m)
-                if market.created_time < since: # Skip markets older than 24 hours
-                    exhausted = True
-                    break
-                if session.get(Market, m["id"]): # Skip markets that already exist
-                    exhausted = True
-                    break
                 session.add(market)
                 new_markets.append(market)
             session.commit()
-            if exhausted or len(batch) < 1000:
+            if stop_fetching or len(batch) < 1000:
                 break
             before = batch[-1]["id"]
     context.log.info(
