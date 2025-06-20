@@ -78,7 +78,7 @@ class MarketComment(SQLModel, table=True):
 
     # other info
     visibility: str
-    hidden: bool = False  # defaults to False, ommited in API response if False
+    hidden: bool = False  # defaults to False, omitted in API response if False
 
     # timestamps
     created_time: datetime
@@ -124,9 +124,8 @@ class MarketBet(SQLModel, table=True):
     is_cancelled: bool = False
     is_redemption: bool = False
 
-
-    created_time: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    updated_time: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    created_time: datetime
+    updated_time: datetime | None = None
 
     # fees
     platform_fee: float = 0
