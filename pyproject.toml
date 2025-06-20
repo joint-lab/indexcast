@@ -41,6 +41,7 @@ inline-quotes = "single"
 
 [tool.ruff.lint.per-file-ignores]
 "migrations/versions/**/*" = ["ALL"]
+"notebooks/**/*" = ["ALL"]
 
 
 [tool.dagster]

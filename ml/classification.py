@@ -5,13 +5,17 @@ Authors:
 - Erik Arnold <ernold@uvm.edu>
 - JGY <jyoung22@uvm.edu>
 """
-import numpy as np
-from models.markets import Market
-from sentence_transformers import SentenceTransformer
 import joblib
+from sentence_transformers import SentenceTransformer
+
+from models.markets import Market
+
 
 class H5N1Classifier:
+    """Classifier for H5N1 markets."""
+
     def __init__(self):
+        """Initialize H5N1Classifier."""
         self.model = SentenceTransformer('Alibaba-NLP/gte-base-en-v1.5', trust_remote_code=True)
         # classifier trained from the market_classification_summary.ipynb in notebooks directory
         self.classifier = joblib.load("binary/classifier_pipeline.joblib")
