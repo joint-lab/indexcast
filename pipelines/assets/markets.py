@@ -14,20 +14,31 @@ from ml.classification import H5N1Classifier
 from models.markets import Market, MarketLabel, MarketLabelType
 
 
+def _safe_fromtimestamp(ms: int) -> datetime | None:
+    """Safely convert milliseconds since epoch to datetime, or return None if out of range."""
+    try:
+        dt = datetime.fromtimestamp(ms / 1000, UTC)
+        if 1 <= dt.year <= 9999:
+            return dt
+        return None
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 def _prepare_market(market_data: dict) -> Market:
     """Prepare a Market object from raw API data."""
-    # Convert timestamps
-    created_time = datetime.fromtimestamp(market_data["createdTime"] / 1000, UTC)
+    # Convert timestamps using safe conversion
+    created_time = _safe_fromtimestamp(market_data["createdTime"])
     closed_time = (
-        datetime.fromtimestamp(market_data["closeTime"] / 1000, UTC)
+        _safe_fromtimestamp(market_data["closeTime"])
         if market_data.get("closeTime") else None
     )
     resolution_time = (
-        datetime.fromtimestamp(market_data["resolutionTime"] / 1000, UTC)
+        _safe_fromtimestamp(market_data["resolutionTime"])
         if market_data.get("resolutionTime") else None
     )
     last_updated_timed = (
-        datetime.fromtimestamp(market_data["lastUpdatedTime"] / 1000, UTC)
+        _safe_fromtimestamp(market_data["lastUpdatedTime"])
         if market_data.get("lastUpdatedTime") else created_time
     )
     return Market(
