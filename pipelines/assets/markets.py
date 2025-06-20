@@ -5,7 +5,7 @@ Authors:
 - JGY <jyoung22@uvm.edu>
 - Erik Arnold <ewarnold@uvm.edu>
 """
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import dagster as dg
 from sqlmodel import Session, select
