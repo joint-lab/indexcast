@@ -56,6 +56,7 @@ class Market(SQLModel, table=True):
     # Relationships
     comments: list["MarketComment"] = Relationship(back_populates="market")
     labels: list["MarketLabel"] = Relationship(back_populates="market")
+    updates: list["MarketUpdate"] = Relationship(back_populates="market")
     scores: list["MarketRelevanceScore"] = Relationship(back_populates="market")
     bets: list["MarketBet"] = Relationship(back_populates="market")
 
@@ -192,3 +193,31 @@ class MarketRelevanceScore(SQLModel, table=True):
     # Relationships
     market: "Market" = Relationship(back_populates="scores")
     score_type: MarketRelevanceScoreType = Relationship(back_populates="market_scores")
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Market updated at
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+class MarketUpdateType(SQLModel, table=True):
+    """All possible updated at types for markets."""
+
+    __tablename__ = "market_update_types"
+
+    id: int = Field(default=None, primary_key=True)
+    update_name: str = Field(unique=True)
+
+    # Relationships
+    market_updates: list["MarketUpdate"] = Relationship(back_populates="update_type")
+
+class MarketUpdate(SQLModel, table=True):
+    """Junction table linking markets to last time they underwent parts of the pipeline."""
+
+    __tablename__ = "market_updates"
+
+    market_id: str = Field(primary_key=True, foreign_key="markets.id")
+    update_type_id: int = Field(primary_key=True, foreign_key="market_update_types.id")
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    # Relationships
+    market: "Market" = Relationship(back_populates="updates")
+    update_type: MarketUpdateType = Relationship(back_populates="market_updates")
+
