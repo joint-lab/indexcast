@@ -18,7 +18,7 @@ class H5N1Classifier:
         """Initialize H5N1Classifier."""
         self.model = SentenceTransformer('Alibaba-NLP/gte-base-en-v1.5', trust_remote_code=True)
         # classifier trained from the market_classification_summary.ipynb in notebooks directory
-        self.classifier = joblib.load("binary/classifier_pipeline.joblib")
+        self.classifier = joblib.load("ml/binary/classifier_pipeline.joblib")
 
 
     def predict(self, market: Market) -> bool:

@@ -11,7 +11,7 @@ import dagster as dg
 from sqlmodel import Session, select
 
 from ml.classification import H5N1Classifier
-from models.markets import Market, MarketLabel, MarketLabelType
+from models.markets import Market, MarketLabel, MarketLabelType, MarketUpdate, MarketUpdateType
 
 
 def _safe_fromtimestamp(ms: int) -> datetime | None:
@@ -137,18 +137,50 @@ def manifold_markets(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
 )
 def market_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     """Update market labels when materialized."""
-    # Select all markets from the database
+    # Get the update type label
     with Session(context.resources.database_engine) as session:
-        markets = session.exec(select(Market)).all()
-        num_markets_processed = len(markets)
+        classified_update_type = session.exec(
+            select(MarketUpdateType).where(MarketUpdateType.update_name == "classified")
+        ).first()
+
+        classified_update_type_id = classified_update_type.id
+        context.log.debug(f"Classified update type ID: {classified_update_type_id}")
+
+    # Only process markets that are new or updated since last classification
+    with Session(context.resources.database_engine) as session:
+        # Subquery to get the last classification time for each market
+        last_classification_subquery = (
+            select(
+                MarketUpdate.market_id,
+                MarketUpdate.updated_at.label("last_classified_at")
+            )
+            .where(MarketUpdate.update_type_id == classified_update_type_id)
+            .subquery()
+        )
+
+        # Main query to get markets needing classification
+        markets_to_process = session.exec(
+            select(Market)
+            .outerjoin(
+                last_classification_subquery,
+                Market.id == last_classification_subquery.c.market_id
+            )
+            .where(
+                # Never classified or market updated since last classification
+                (last_classification_subquery.c.last_classified_at.is_(None)) |
+                (Market.updated_at > last_classification_subquery.c.last_classified_at)
+            )
+        ).all()
+
+        num_markets_processed = len(markets_to_process)
         context.log.info(
-            f"Fetched {num_markets_processed} markets from the database."
+            f"Found {num_markets_processed} markets needing classification."
         )
 
     # Apply classification logic
     classification_results = []
     h5n1_classifier = H5N1Classifier()
-    for m in markets:
+    for m in markets_to_process:
         context.log.debug(f"Processing market: {m.id} - {m.question}")
         classification_results.append(
             (m.id, h5n1_classifier.predict(m))
@@ -164,14 +196,17 @@ def market_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
         context.log.debug(f"Found H5N1 label type ID: {h5n1_label_type_id}")
 
     # Update classification results in the database
+    current_time = datetime.now(UTC)
     with Session(context.resources.database_engine) as session:
         for (market_id, is_h5n1) in classification_results:
+            # Update market labels
             existing_label = session.exec(
                 select(MarketLabel).where(
                     (MarketLabel.market_id == market_id) &
                     (MarketLabel.label_type_id == h5n1_label_type_id)
                 )
             ).first()
+
             if is_h5n1 and not existing_label:
                 # Add label if classified as h5n1 and label does not exist
                 market_label = MarketLabel(
@@ -182,7 +217,27 @@ def market_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
             elif not is_h5n1 and existing_label:
                 # Remove label if not classified as h5n1 and label exists
                 session.delete(existing_label)
+
+            # Track this market was classified
+            existing_update = session.exec(
+                select(MarketUpdate).where(
+                    (MarketUpdate.market_id == market_id) &
+                    (MarketUpdate.update_type_id == classified_update_type_id)
+                )
+            ).first()
+
+            if existing_update:
+                existing_update.updated_at = current_time
+            else:
+                market_update = MarketUpdate(
+                    market_id=market_id,
+                    update_type_id=classified_update_type_id,
+                    updated_at=current_time
+                )
+                session.add(market_update)
+
             session.commit()
+
 
     return dg.MaterializeResult(
         metadata={
