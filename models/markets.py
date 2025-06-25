@@ -195,7 +195,7 @@ class MarketRelevanceScore(SQLModel, table=True):
     score_type: MarketRelevanceScoreType = Relationship(back_populates="market_scores")
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-# Market updated at
+# Market updates
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 class MarketUpdateType(SQLModel, table=True):
     """All possible updated at types for markets."""
