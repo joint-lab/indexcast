@@ -197,27 +197,15 @@ class MarketRelevanceScore(SQLModel, table=True):
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # Market updates
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-class MarketUpdateType(SQLModel, table=True):
-    """All possible updated at types for markets."""
-
-    __tablename__ = "market_update_types"
-
-    id: int = Field(default=None, primary_key=True)
-    update_name: str = Field(unique=True)
-
-    # Relationships
-    market_updates: list["MarketUpdate"] = Relationship(back_populates="update_type")
-
 class MarketUpdate(SQLModel, table=True):
     """Junction table linking markets to last time they underwent parts of the pipeline."""
 
     __tablename__ = "market_updates"
 
     market_id: str = Field(primary_key=True, foreign_key="markets.id")
-    update_type_id: int = Field(primary_key=True, foreign_key="market_update_types.id")
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    classified_at: datetime | None = None
+    reranked_at: datetime | None = None
 
     # Relationships
     market: "Market" = Relationship(back_populates="updates")
-    update_type: MarketUpdateType = Relationship(back_populates="market_updates")
 

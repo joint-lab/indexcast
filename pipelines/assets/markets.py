@@ -11,7 +11,7 @@ import dagster as dg
 from sqlmodel import Session, select
 
 from ml.classification import H5N1Classifier
-from models.markets import Market, MarketLabel, MarketLabelType, MarketUpdate, MarketUpdateType
+from models.markets import Market, MarketLabel, MarketLabelType, MarketUpdate
 
 
 def _safe_fromtimestamp(ms: int) -> datetime | None:
@@ -137,38 +137,16 @@ def manifold_markets(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
 )
 def market_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     """Update market labels when materialized."""
-    # Get the update type label
-    with Session(context.resources.database_engine) as session:
-        classified_update_type = session.exec(
-            select(MarketUpdateType).where(MarketUpdateType.update_name == "classified")
-        ).first()
-
-        classified_update_type_id = classified_update_type.id
-        context.log.debug(f"Classified update type ID: {classified_update_type_id}")
-
     # Only process markets that are new or updated since last classification
     with Session(context.resources.database_engine) as session:
-        # Subquery to get the last classification time for each market
-        last_classification_subquery = (
-            select(
-                MarketUpdate.market_id,
-                MarketUpdate.updated_at.label("last_classified_at")
-            )
-            .where(MarketUpdate.update_type_id == classified_update_type_id)
-            .subquery()
-        )
-
-        # Main query to get markets needing classification
+        #
         markets_to_process = session.exec(
             select(Market)
-            .outerjoin(
-                last_classification_subquery,
-                Market.id == last_classification_subquery.c.market_id
-            )
+            .outerjoin(MarketUpdate, Market.id == MarketUpdate.market_id)
             .where(
                 # Never classified or market updated since last classification
-                (last_classification_subquery.c.last_classified_at.is_(None)) |
-                (Market.updated_at > last_classification_subquery.c.last_classified_at)
+                (MarketUpdate.classified_at.is_(None)) |
+                (Market.updated_at > MarketUpdate.classified_at)
             )
         ).all()
 
@@ -220,19 +198,18 @@ def market_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
 
             # Track this market was classified
             existing_update = session.exec(
-                select(MarketUpdate).where(
-                    (MarketUpdate.market_id == market_id) &
-                    (MarketUpdate.update_type_id == classified_update_type_id)
-                )
+                select(MarketUpdate).where(MarketUpdate.market_id == market_id)
             ).first()
 
             if existing_update:
-                existing_update.updated_at = current_time
+                # Update classified_at field
+                existing_update.classified_at = current_time
             else:
+                # Create new MarketUpdate with classified_at timestamp
                 market_update = MarketUpdate(
                     market_id=market_id,
-                    update_type_id=classified_update_type_id,
-                    updated_at=current_time
+                    classified_at=current_time
+                    # reranked_at will use default value (None)
                 )
                 session.add(market_update)
 
