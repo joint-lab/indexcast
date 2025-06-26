@@ -5,6 +5,8 @@ Authors:
 - Erik Arnold <ernold@uvm.edu>
 - JGY <jyoung22@uvm.edu>
 """
+from os import path
+
 import joblib
 from sentence_transformers import SentenceTransformer
 
@@ -18,7 +20,9 @@ class H5N1Classifier:
         """Initialize H5N1Classifier."""
         self.model = SentenceTransformer('Alibaba-NLP/gte-base-en-v1.5', trust_remote_code=True)
         # classifier trained from the market_classification_summary.ipynb in notebooks directory
-        self.classifier = joblib.load("ml/binary/classifier_pipeline.joblib")
+        base_dir = path.dirname(path.abspath(__file__))
+        joblib_path = path.join(base_dir, "binary", "classifier_pipeline.joblib")
+        self.classifier = joblib.load(joblib_path)
 
 
     def predict(self, market: Market) -> bool:
