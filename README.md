@@ -9,6 +9,7 @@ We focus on health emergencies and major global events.
 * `ml`: Machine learning models for classification, reranking, index creation, etc.
 * `models`: SQL models for the database.
 * `pipelines`: Dagster pipelines for data scrapping and processing.
+* `notebooks`: Python notebooks used for testing some methodology of this project.
 
 # Getting started
 
