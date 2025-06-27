@@ -424,6 +424,13 @@ def manifold_full_markets(context: dg.AssetExecutionContext) -> dg.MaterializeRe
             session.commit()
 
         total_bets_updated += len(all_bets)
+
+        with Session(context.resources.database_engine) as session:
+            # update the time for full market at
+            row = session.get(MarketUpdate, m)
+            row.full_market_at = datetime.now(UTC)
+            session.commit()
+
         context.log.info(
             f"Market {m}: updated {len(all_bets)} bets."
         )
