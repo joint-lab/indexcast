@@ -82,7 +82,6 @@ def _prepare_bet(bet_data: dict) -> MarketBet:
         _safe_fromtimestamp(bet_data["updatedTime"])
         if bet_data.get("updatedTime") else None
     )
-    fills = json.dumps(bet_data.get("fills"))
 
     return MarketBet(
         # identifiers
@@ -97,7 +96,7 @@ def _prepare_bet(bet_data: dict) -> MarketBet:
         order_amount=bet_data.get("orderAmount",0.0),
         loan_amount=bet_data.get("loanAmount", 0.0),
         shares=bet_data["shares"],
-        fills=fills,
+        fills=json.dumps(bet_data.get("fills")),
 
         # probabilities
         prob_before=bet_data["probBefore"],
@@ -337,9 +336,7 @@ def manifold_full_markets(context: dg.AssetExecutionContext) -> dg.MaterializeRe
     # get list of market ids that have been labeled
     with Session(context.resources.database_engine) as session:
         market_ids = session.exec(select(MarketLabel.market_id)).all()
-    context.log.info(
-        f"Found {len(market_ids)} labeled markets."
-    )
+    context.log.info(f"Found {len(market_ids)} labeled markets.")
     total_comments_inserted = 0
     total_bets_updated = 0
 
