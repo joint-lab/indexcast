@@ -8,10 +8,19 @@ Authors:
 from datetime import UTC, datetime
 
 import dagster as dg
+from sqlalchemy import delete
 from sqlmodel import Session, select
+import json
 
 from ml.classification import H5N1Classifier
-from models.markets import Market, MarketLabel, MarketLabelType, MarketUpdate
+from models.markets import (
+    Market,
+    MarketBet,
+    MarketComment,
+    MarketLabel,
+    MarketLabelType,
+    MarketUpdate,
+)
 
 
 def _safe_fromtimestamp(ms: int) -> datetime | None:
@@ -62,6 +71,92 @@ def _prepare_market(market_data: dict) -> Market:
         last_updated_time=last_updated_timed,
         closed_time=closed_time,
         resolution_time=resolution_time,
+        updated_at=datetime.now(UTC),
+    )
+
+
+def _prepare_bet(bet_data: dict) -> MarketBet:
+    """Prepare a MarketBet object from raw API data."""
+    created_time = _safe_fromtimestamp(bet_data["createdTime"])
+    updated_time = (
+        _safe_fromtimestamp(bet_data["updatedTime"])
+        if bet_data.get("updatedTime") else None
+    )
+    fills = json.dumps(bet_data.get("fills"))
+
+    return MarketBet(
+        # identifiers
+        id=bet_data["id"],
+        contract_id=bet_data["contractId"],
+        user_id=bet_data["userId"],
+        bet_group_id=bet_data.get("betGroupId"),
+
+        # bet info
+        outcome=bet_data["outcome"],
+        amount=bet_data["amount"],
+        order_amount=bet_data.get("orderAmount",0.0),
+        loan_amount=bet_data.get("loanAmount", 0.0),
+        shares=bet_data["shares"],
+        fills=fills,
+
+        # probabilities
+        prob_before=bet_data["probBefore"],
+        prob_after=bet_data["probAfter"],
+        limit_prob=bet_data.get("limitProb"),
+
+        # status
+        visibility=bet_data.get("visibility", ""),
+        is_api=bet_data.get("isApi", False),
+        is_filled=bet_data.get("isFilled", False),
+        is_cancelled=bet_data.get("isCancelled", False),
+        is_redemption=bet_data.get("isRedemption", False),
+
+        created_time=created_time,
+        updated_time=updated_time,
+
+        # fees
+        platform_fee=bet_data.get("fees", {}).get("platformFee", 0.0),
+        liquidity_fee=bet_data.get("fees", {}).get("liquidityFee", 0.0),
+        creator_fee=bet_data.get("fees", {}).get("creatorFee", 0.0),
+
+        # internal timestamp
+        updated_at=datetime.now(UTC),
+    )
+
+def _prepare_comment(comment_data: dict) -> MarketComment:
+    """Prepare a MarketComment object from raw API data."""
+    created_time = _safe_fromtimestamp(comment_data["createdTime"])
+    hidden_time = (
+        _safe_fromtimestamp(comment_data["hiddenTime"])
+        if comment_data.get("hiddenTime") else None
+    )
+    edited_time = (
+        _safe_fromtimestamp(comment_data["editedTime"])
+        if comment_data.get("editedTime") else None
+    )
+
+    return MarketComment(
+        # identifiers
+        id=comment_data["id"],
+        market_id=comment_data.get("contractId"),
+        user_id=comment_data["userId"],
+        reply_to_comment_id=comment_data.get("replyToCommentId"),
+
+        # content
+        comment_type=comment_data["commentType"],
+        is_api=comment_data.get("isApi", False),
+        content=json.dumps(comment_data["content"]),
+
+        # other info
+        visibility=comment_data["visibility"],
+        hidden=comment_data.get("hidden", False),
+
+        # timestamps
+        created_time=created_time,
+        hidden_time=hidden_time,
+        edited_time=edited_time,
+
+        # internal timestamp
         updated_at=datetime.now(UTC),
     )
 
@@ -139,7 +234,6 @@ def market_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     """Update market labels when materialized."""
     # Only process markets that are new or updated since last classification
     with Session(context.resources.database_engine) as session:
-        #
         markets_to_process = session.exec(
             select(Market)
             .outerjoin(MarketUpdate, Market.id == MarketUpdate.market_id)
@@ -220,5 +314,124 @@ def market_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
         metadata={
             "num_markets_processed": dg.MetadataValue.int(num_markets_processed),
             "num_markets_h5n1": dg.MetadataValue.int(num_markets_h5n1),
+        }
+    )
+
+
+@dg.asset(
+    deps=[market_labels],
+    required_resource_keys={"database_engine", "manifold_client"},
+    description="Full Market table (bets, comments, description).",
+)
+def manifold_full_markets(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
+    """
+    Fetch latest bets from the Manifold API and populate the market_bets table.
+
+    This asset looks at the labels table, fetches all bets from the Manifold API for those
+    markets, checks if they already exist in the database, and inserts new bets.
+    It also respects the Manifold API rate limits and handles pagination.
+    """
+    # Manifold API client
+    manifold_client = context.resources.manifold_client
+
+    # get list of market ids that have been labeled
+    with Session(context.resources.database_engine) as session:
+        market_ids = session.exec(select(MarketLabel.market_id)).all()
+    context.log.info(
+        f"Found {len(market_ids)} labeled markets."
+    )
+    total_comments_inserted = 0
+    total_bets_updated = 0
+
+    for m in market_ids:
+        # get description
+        full_market = manifold_client.full_market(m)
+        with Session(context.resources.database_engine) as session:
+            market = session.exec(
+                select(Market).where(Market.id == m)
+            ).first()
+            market.description = json.dumps(full_market.get("description"))
+            session.commit()
+
+        # comments
+        all_comments = []
+        before = None
+        while True:
+            batch = manifold_client.comments(m, limit=1000, before=before)
+            if not batch:
+                break
+            all_comments.extend(batch)
+            if len(batch) < 1000:
+                break
+            before = batch[-1]["id"]
+
+        # delete old and bulk-insert fresh
+        with Session(context.resources.database_engine) as session:
+            # delete existing comments
+            session.exec(
+                delete(MarketComment)
+                .where(MarketComment.market_id == m)
+            )
+            # prepare & bulk-save new comments
+            objs = [_prepare_comment(cdata) for cdata in all_comments]
+            session.bulk_save_objects(objs)
+
+            # commit both delete + insert together
+            session.commit()
+        total_comments_inserted += len(all_comments)
+        context.log.info(
+            f"Market {m}: found {len(all_comments)} comments."
+        )
+
+
+        # bets: we want all bets that were unfilled, or are new
+        all_bets= []
+        before = None
+        while True:
+            batch = manifold_client.bets(m, limit=1000, before=before)
+            if not batch:
+                break
+            all_bets.extend(batch)
+            if len(batch) < 1000:
+                break
+            before = batch[-1]["id"]
+
+        with Session(context.resources.database_engine) as session:
+            # get (id, is_filled) for existing bets
+            rows = session.exec(
+                select(MarketBet.id, MarketBet.is_filled)
+                .where(MarketBet.contract_id == m)
+            ).all()
+            existing_ids = {row[0] for row in rows}
+            unfilled_ids = [row[0] for row in rows if not row[1]]
+
+            # delete only the unfilled bets
+            if unfilled_ids:
+                session.exec(
+                    delete(MarketBet)
+                    .where(MarketBet.id.in_(unfilled_ids))
+                )
+
+            # get the bets that aren't in the db
+            to_insert = [
+                _prepare_bet(b)
+                for b in all_bets
+                if b["id"] not in existing_ids
+            ]
+
+            # bulk‐insert the new + formerly-unfilled bets
+            session.add_all(to_insert)
+            session.commit()
+
+        total_bets_updated += len(all_bets)
+        context.log.info(
+            f"Market {m}: updated {len(all_bets)} bets."
+        )
+
+    return dg.MaterializeResult(
+        metadata={
+            "num_markets_processed": dg.MetadataValue.int(len(market_ids)),
+            "total_comments_inserted": dg.MetadataValue.int(total_comments_inserted),
+            "total_bets_updated": dg.MetadataValue.int(total_bets_updated),
         }
     )

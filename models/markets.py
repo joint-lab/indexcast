@@ -27,7 +27,7 @@ class Market(SQLModel, table=True):
 
     # content
     question: str
-    description: str | None = None
+    description: str | None = None #json
 
     # trading summaries
     probability: float | None = None  # multiple choice markets don't have a probability
@@ -73,7 +73,7 @@ class MarketComment(SQLModel, table=True):
     reply_to_comment_id: str | None = None
 
     # content
-    comment_type: str
+    comment_type: str #json
     is_api: bool
     content: str
 
@@ -204,6 +204,7 @@ class MarketUpdate(SQLModel, table=True):
 
     market_id: str = Field(primary_key=True, foreign_key="markets.id")
     classified_at: datetime | None = None
+    full_market_at: datetime | None = None
     reranked_at: datetime | None = None
 
     # Relationships

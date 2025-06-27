@@ -84,6 +84,48 @@ class ManifoldClient:
             raise ValueError("Limit must be 1000 or less.")
         return self.execute_get_request("markets", params=params)
 
+    def full_market(self, market_id: str) -> dict:
+        """
+        Fetch full market details by ID.
+
+        Args:
+            market_id (str): The ID of the market.
+
+        Returns:
+            dict: The full market data.
+
+        """
+        return self.execute_get_request(f"market/{market_id}")
+
+    def bets(self, market_id: str, limit=1000, before=None) -> list:
+        """
+        Fetch bets for a specific market.
+
+        Args:
+            market_id (str): The ID of the market.
+            limit (int): Maximum number of bets to fetch (default 1000).
+
+        Returns:
+            list: A list of bets.
+
+        """
+        params = {"contractId": market_id, "limit": 1000, "before": before}
+        return self.execute_get_request("bets", params=params)
+
+    def comments(self, market_id: str, limit=1000, before=None) -> list:
+        """
+        Fetch comments for a specific market.
+
+        Args:
+            market_id (str): The ID of the market.
+
+        Returns:
+            list: A list of comments.
+
+        """
+        params = {"contractId": market_id, "limit": limit, "before": before}
+        return self.execute_get_request("comments", params=params)
+
 @dg.resource
 def manifold_api_resource(context):
     """Manifold API client as a resource."""
