@@ -5,12 +5,12 @@ Authors:
 - JGY <jyoung22@uvm.edu>
 - Erik Arnold <ewarnold@uvm.edu>
 """
+import json
 from datetime import UTC, datetime
 
 import dagster as dg
 from sqlalchemy import delete
 from sqlmodel import Session, select
-import json
 
 from ml.classification import H5N1Classifier
 from models.markets import (

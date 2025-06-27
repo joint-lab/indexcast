@@ -90,6 +90,8 @@ class ManifoldClient:
 
         Args:
             market_id (str): The ID of the market.
+            limit (int): Number of markets to fetch. Maximum is 1000.
+            before (str, optional): Fetch markets created before this id.
 
         Returns:
             dict: The full market data.
@@ -104,6 +106,7 @@ class ManifoldClient:
         Args:
             market_id (str): The ID of the market.
             limit (int): Maximum number of bets to fetch (default 1000).
+            before (str, optional): Fetch markets created before this id.
 
         Returns:
             list: A list of bets.
@@ -118,6 +121,8 @@ class ManifoldClient:
 
         Args:
             market_id (str): The ID of the market.
+            limit (int): Number of markets to fetch. Maximum is 1000.
+            before (str, optional): Fetch markets created before this id.
 
         Returns:
             list: A list of comments.
