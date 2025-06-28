@@ -25,8 +25,6 @@ class DiseaseInformation(BaseModel):
     date: str = Field(description="The date we are interested in.")
     overall_index_question: str = Field(description="Overall index question.")
 
-
-
 def get_prompt(prompt_template_file: str, disease_data: DiseaseInformation) -> str:
     """
     Use a template file to generate a prompt.
