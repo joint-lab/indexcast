@@ -6,10 +6,10 @@ Authors:
 - Erik Arnold <ewarnold@uvm.edu>
 """
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import dagster as dg
-from sqlalchemy import delete
+from sqlalchemy import delete, func
 from sqlmodel import Session, select
 
 from ml.classification import H5N1Classifier
@@ -19,6 +19,8 @@ from models.markets import (
     MarketComment,
     MarketLabel,
     MarketLabelType,
+    MarketRelevanceScore,
+    MarketRelevanceScoreType,
     MarketUpdate,
 )
 
@@ -159,6 +161,55 @@ def _prepare_comment(comment_data: dict) -> MarketComment:
         updated_at=datetime.now(UTC),
     )
 
+
+def get_market_prob_at_time(session: Session, market_id: str, query_time: datetime) -> float:
+    """
+    Retrieve the most recent probability for a given market at or before the
+    specified query time.
+
+    Parameters
+    ----------
+    session (Session): SQLAlchemy session used to query the database.
+    market_id (str): Unique identifier for the market to query.
+    query_time (datetime): Timestamp representing the cutoff for bet history.
+
+    Returns
+    -------
+    float or None: The `prob_after` value from the latest bet before or at query_time.
+    Returns None if no such bet exists.
+
+    """
+    bet = session.exec(
+        select(MarketBet)
+        .where(MarketBet.contract_id == market_id)
+        .where(MarketBet.created_time <= query_time)
+        .order_by(MarketBet.created_time.desc())
+        .limit(1)
+    ).first()
+    return bet.prob_after if bet else None
+
+
+def get_volume(session: Session, market_id: str, query_time: datetime) -> float:
+    """
+    Retrieve the volume for a given market since the given query time.
+
+    Parameters
+    ----------
+    session (Session): SQLAlchemy session used to query the database.
+    market_id (str): Unique identifier for the market to query.
+    query_time (datetime): Timestamp representing the time from which to query.
+
+    Returns
+    -------
+    float: The `volume` since the given query time.
+
+    """
+    now = datetime.now(UTC)
+    result = session.exec(select(func.sum(func.abs(MarketBet.amount)))
+                          .where(MarketBet.contract_id == market_id).where(
+                          MarketBet.created_time <= now)
+                          .where(MarketBet.created_time >= query_time)).one_or_none()
+    return result or 0.0
 
 @dg.asset(
     required_resource_keys={"database_engine", "manifold_client"},
@@ -439,3 +490,84 @@ def manifold_full_markets(context: dg.AssetExecutionContext) -> dg.MaterializeRe
             "total_bets_updated": dg.MetadataValue.int(total_bets_updated),
         }
     )
+
+
+@dg.asset(
+    deps=[manifold_full_markets],
+    required_resource_keys={"database_engine"},
+    description="Relevance scores for the labeled markets.",
+)
+def manifold_relevance_scores(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
+    # get list of market ids that have been labeled
+    with Session(context.resources.database_engine) as session:
+        market_ids = session.exec(select(MarketLabel.market_id)).all()
+    context.log.info(f"Found {len(market_ids)} labeled markets.")
+
+    # Load all score‐type rows once and build a name→id map
+    with Session(context.resources.database_engine) as session:
+        score_type_rows = session.exec(select(MarketRelevanceScoreType)).all()
+    score_type_map = { row.score_name: row.id for row in score_type_rows }
+    context.log.info(f"Found {len(score_type_map)} relevance label types.")
+
+    with Session(context.resources.database_engine) as session:
+        for market_id in market_ids:
+            # delete old row
+            session.exec(
+                delete(MarketRelevanceScore)
+                .where(MarketRelevanceScore.market_id == market_id)
+                .where(MarketRelevanceScore.score_type_id.in_(score_type_map.values()))
+            )
+
+            # volume_total
+            volume_total = get_volume(session, market_id, datetime.min)
+
+            # volume_24h
+            volume_24h = get_volume(session, market_id, datetime.now(UTC) - timedelta(hours=24))
+
+            # volume_144h
+            volume_144h = get_volume(session, market_id, datetime.now(UTC) - timedelta(hours=144))
+
+            # num_traders
+            num_traders = session.exec(select(func.count(func.distinct(MarketBet.user_id)))
+        .where(MarketBet.contract_id == market_id)).one_or_none() | 0
+
+            # num_comments
+            num_comments = session.exec(select(func.count())
+                .where(MarketComment.market_id == market_id)).one_or_none() | 0
+
+            # temporal_relevance
+
+            # geographical_relevance
+
+            # index_question_relevance
+
+            to_insert = []
+            for name, val in [
+                ("volume_total", volume_total),
+                ("volume_24h", volume_24h),
+                ("volume_144h", volume_144h),
+                ("num_traders", num_traders),
+                ("num_comments", num_comments),
+            ]:
+                type_id = score_type_map.get(name)
+                if type_id is None:
+                    raise ValueError(f"Unknown score type: {name}")
+
+                to_insert.append(
+                    MarketRelevanceScore(
+                        market_id=market_id,
+                        score_type_id=type_id,
+                        score_value=val,
+                    )
+                )
+
+            session.add_all(to_insert)
+
+        session.commit()
+
+    return dg.MaterializeResult(
+        metadata={
+            "num_markets_processed": dg.MetadataValue.int(len(market_ids))
+        }
+    )
+
