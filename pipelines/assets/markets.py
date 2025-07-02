@@ -23,6 +23,8 @@ from models.markets import (
     MarketRelevanceScoreType,
     MarketUpdate,
 )
+from ml.ranker import DiseaseInformation, relevance_score, get_prompt
+from ml.clients import get_client
 
 
 def _safe_fromtimestamp(ms: int) -> datetime | None:
@@ -535,11 +537,50 @@ def manifold_relevance_scores(context: dg.AssetExecutionContext) -> dg.Materiali
             num_comments = session.exec(select(func.count())
                 .where(MarketComment.market_id == market_id)).one_or_none() | 0
 
+
+            # use the disease information class from the ranker file for structured info for prompting
+            # Get the Market label name
+            market_label = session.exec(
+                select(MarketLabel).where(MarketLabel.market_id == market_id)
+            ).first()
+            label_name = market_label.label_type.label_name
+
+            # risk question for H5N1
+            question = "Will there be a massive H5N1 outbreak in the next 12 months?"
+
+            # date
+            todays_date = datetime.now(UTC)
+            disease_info = DiseaseInformation(
+                disease=label_name,
+                date=todays_date,
+                overall_index_question=question
+            )
+            # client
+            client = get_client()
+            market = session.exec(
+                select(Market).where(Market.id == market_id)
+            ).first()
+
+            # Extract the two fields
+            title = market.question
+            description = market.description
+
+            # build text rep
+            text_rep = f"""<Title>{title}</Title>
+
+            <Description>{description}</Description>"""
+
             # temporal_relevance
+            prompt = get_prompt("ml/prompts/temporal_relevnace_prompt.j2", disease_info)
+            temporal_relevance = relevance_score(prompt, text_rep, client)
 
             # geographical_relevance
+            prompt = get_prompt("ml/prompts/geographical_relevance.j2", disease_info)
+            geographical_relevance = relevance_score(prompt, text_rep, client)
 
             # index_question_relevance
+            prompt = get_prompt("ml/prompts/index_question_relevance.j2", disease_info)
+            index_question_relevance = relevance_score(prompt, text_rep, client)
 
             to_insert = []
             for name, val in [
@@ -548,6 +589,9 @@ def manifold_relevance_scores(context: dg.AssetExecutionContext) -> dg.Materiali
                 ("volume_144h", volume_144h),
                 ("num_traders", num_traders),
                 ("num_comments", num_comments),
+                ("temporal_relevance", temporal_relevance),
+                ("geographical_relevance", geographical_relevance),
+                ("index_question_relevance", index_question_relevance),
             ]:
                 type_id = score_type_map.get(name)
                 if type_id is None:
