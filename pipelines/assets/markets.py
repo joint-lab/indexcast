@@ -6,13 +6,18 @@ Authors:
 - Erik Arnold <ewarnold@uvm.edu>
 """
 import json
+import re
+import time
 from datetime import UTC, datetime, timedelta
 
 import dagster as dg
+import requests
 from sqlalchemy import delete, func
 from sqlmodel import Session, select
 
 from ml.classification import H5N1Classifier
+from ml.clients import get_client
+from ml.ranker import DiseaseInformation, get_prompt, relevance_score
 from models.markets import (
     Market,
     MarketBet,
@@ -23,8 +28,6 @@ from models.markets import (
     MarketRelevanceScoreType,
     MarketUpdate,
 )
-from ml.ranker import DiseaseInformation, relevance_score, get_prompt
-from ml.clients import get_client
 
 
 def _safe_fromtimestamp(ms: int) -> datetime | None:
@@ -166,19 +169,16 @@ def _prepare_comment(comment_data: dict) -> MarketComment:
 
 def get_market_prob_at_time(session: Session, market_id: str, query_time: datetime) -> float:
     """
-    Retrieve the most recent probability for a given market at or before the
-    specified query time.
+    Retrieve the most recent probability for a given market at or before the specified query time.
 
-    Parameters
-    ----------
-    session (Session): SQLAlchemy session used to query the database.
-    market_id (str): Unique identifier for the market to query.
-    query_time (datetime): Timestamp representing the cutoff for bet history.
+    Args:
+        session (Session): SQLAlchemy session used to query the database.
+        market_id (str): Unique identifier for the market to query.
+        query_time (datetime): Timestamp representing the cutoff for bet history.
 
-    Returns
-    -------
-    float or None: The `prob_after` value from the latest bet before or at query_time.
-    Returns None if no such bet exists.
+    Returns:
+        float or None: The `prob_after` value from the latest bet before or at query_time.
+            Returns None if no such bet exists.
 
     """
     bet = session.exec(
@@ -195,15 +195,13 @@ def get_volume(session: Session, market_id: str, query_time: datetime) -> float:
     """
     Retrieve the volume for a given market since the given query time.
 
-    Parameters
-    ----------
-    session (Session): SQLAlchemy session used to query the database.
-    market_id (str): Unique identifier for the market to query.
-    query_time (datetime): Timestamp representing the time from which to query.
+    Args:
+        session (Session): SQLAlchemy session used to query the database.
+        market_id (str): Unique identifier for the market to query.
+        query_time (datetime): Timestamp representing the time from which to query.
 
-    Returns
-    -------
-    float: The `volume` since the given query time.
+    Returns:
+        float: The `volume` since the given query time.
 
     """
     now = datetime.now(UTC)
@@ -212,6 +210,52 @@ def get_volume(session: Session, market_id: str, query_time: datetime) -> float:
                           MarketBet.created_time <= now)
                           .where(MarketBet.created_time >= query_time)).one_or_none()
     return result or 0.0
+
+def fetch_text_from_url(
+        url: str,
+        retries: int = 3,
+        timeout: float = 60,
+        backoff: float = 5,
+        rate_limit_pause: float = 3
+) -> str:
+    """
+    Fetch LLM-friendly text from r.jina.ai with API key authorization.
+
+    - url: target webpage (e.g. "https://example.com")
+    - retries: number of retry attempts on timeout
+    - timeout: per-request read timeout (seconds)
+    - backoff: seconds to wait before each retry
+    - rate_limit_pause: optional pause after successful fetch (seconds)
+    """
+    endpoint = f"https://r.jina.ai/{url}"
+
+    for _attempt in range(1, retries + 1):
+        try:
+            resp = requests.get(endpoint, timeout=timeout)
+            resp.raise_for_status()
+            text = resp.text
+            if rate_limit_pause:
+                time.sleep(rate_limit_pause)
+            return text
+
+        except requests.exceptions.ReadTimeout:
+            time.sleep(backoff)
+        except requests.exceptions.HTTPError:
+            return f"HTTP error {resp.status_code}: {resp.text}"
+        except Exception as e:
+            return f"Error: {e}"
+
+    return "Error: failed after multiple retries"
+
+def extract_urls(text: str) -> list[str]:
+    """
+    Find all HTTP/HTTPS URLs in the given text.
+
+    Returns a list of matching URL strings.
+    """
+    # Regex pattern to match most http(s) URLs
+    url_pattern = r'(https?://[^\s]+)'
+    return re.findall(url_pattern, text)
 
 @dg.asset(
     required_resource_keys={"database_engine", "manifold_client"},
@@ -377,11 +421,12 @@ def market_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
 )
 def manifold_full_markets(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     """
-    Fetch latest bets from the Manifold API and populate the market_bets table.
+    Fetch the latest bets and comments from the Manifold API and populates the market_bets table.
 
-    This asset looks at the labels table, fetches all bets from the Manifold API for those
-    markets, checks if they already exist in the database, and inserts new bets.
-    It also respects the Manifold API rate limits and handles pagination.
+    This asset looks at the labels table, fetches all bets, comments and the descriptions
+    from the Manifold API for those markets. It inserts new bets and overwites all comments and
+    the description fresh each time.It also respects the Manifold API rate limits and
+    handles pagination.
     """
     # Manifold API client
     manifold_client = context.resources.manifold_client
@@ -500,6 +545,12 @@ def manifold_full_markets(context: dg.AssetExecutionContext) -> dg.MaterializeRe
     description="Relevance scores for the labeled markets.",
 )
 def manifold_relevance_scores(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
+    """
+    Use bet/comments tables and client.py prompting to populate relevance_scores table.
+
+    This asset looks at the labels table and for all labeled markets, it generates 8 relevance
+    scores and stores them in the database.
+    """
     # get list of market ids that have been labeled
     with Session(context.resources.database_engine) as session:
         market_ids = session.exec(select(MarketLabel.market_id)).all()
@@ -531,14 +582,15 @@ def manifold_relevance_scores(context: dg.AssetExecutionContext) -> dg.Materiali
 
             # num_traders
             num_traders = session.exec(select(func.count(func.distinct(MarketBet.user_id)))
-        .where(MarketBet.contract_id == market_id)).one_or_none() | 0
+                .where(MarketBet.contract_id == market_id)).one_or_none() | 0
 
             # num_comments
             num_comments = session.exec(select(func.count())
                 .where(MarketComment.market_id == market_id)).one_or_none() | 0
 
 
-            # use the disease information class from the ranker file for structured info for prompting
+            # use the disease information class from the ranker file for structured info
+            # for prompting
             # Get the Market label name
             market_label = session.exec(
                 select(MarketLabel).where(MarketLabel.market_id == market_id)
@@ -565,10 +617,24 @@ def manifold_relevance_scores(context: dg.AssetExecutionContext) -> dg.Materiali
             title = market.question
             description = market.description
 
-            # build text rep
-            text_rep = f"""<Title>{title}</Title>
+            # if there are urls in the description, might need them to add context
+            urls = extract_urls(market.description)
 
-            <Description>{description}</Description>"""
+            if len(urls) > 0:
+                url_text = ""
+                for url in urls:
+                    url_text += fetch_text_from_url(url)
+
+            # build text rep
+            if len(url_text) > 0:
+                # trim for now to make sure not too many tokens
+                trimmed = url_text[:4875]
+                text_rep = f"""<Title>{title}</Title>
+                <Description>{description}</Description> 
+                <Url Text>{trimmed}</Url Text> """
+            else:
+                text_rep = f"""<Title>{title}</Title>
+                <Description>{description}</Description>"""
 
             # temporal_relevance
             prompt = get_prompt("ml/prompts/temporal_relevnace_prompt.j2", disease_info)

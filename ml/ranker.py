@@ -69,5 +69,3 @@ def relevance_score(prompt: str, market_text_representation: str,
         temperature=0.3
     )
     return response
-
-
