@@ -613,20 +613,21 @@ def manifold_relevance_scores(context: dg.AssetExecutionContext) -> dg.Materiali
                 select(Market).where(Market.id == market_id)
             ).first()
 
-            # Extract the two fields
+            # Extract the title and description
             title = market.question
-            description = market.description
+            # make sure the description is not too long
+            description = market.description[:4875]
 
             # if there are urls in the description, might need them to add context
             urls = extract_urls(market.description)
-
+            url_text = ""
             if len(urls) > 0:
-                url_text = ""
                 for url in urls:
                     url_text += fetch_text_from_url(url)
 
             # build text rep
-            if len(url_text) > 0:
+            # make sure there were urls and fetching the contents did not result in an error
+            if len(url_text) > 0 and not "error" in url_text[:20].lower():
                 # trim for now to make sure not too many tokens
                 trimmed = url_text[:4875]
                 text_rep = f"""<Title>{title}</Title>

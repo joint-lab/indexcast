@@ -59,7 +59,7 @@ def relevance_score(prompt: str, market_text_representation: str,
 
     """
     response = client.chat.completions.create(
-        model="gpt-4.1-nano",
+        model="gpt-4.1-mini",
         messages=[
             {"role": "system", "content": prompt},
             {"role": "user", "content": market_text_representation}
