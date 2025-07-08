@@ -6,8 +6,8 @@ Authors:
 - Erik Arnold <ewarnold@uvm.edu>
 """
 
-from os import path
 from datetime import datetime
+from os import path
 
 import instructor
 from jinja2 import Environment, FileSystemLoader
