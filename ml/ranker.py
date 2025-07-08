@@ -6,6 +6,9 @@ Authors:
 - Erik Arnold <ewarnold@uvm.edu>
 """
 
+from os import path
+from datetime import datetime
+
 import instructor
 from jinja2 import Environment, FileSystemLoader
 from pydantic import BaseModel, Field
@@ -22,7 +25,7 @@ class DiseaseInformation(BaseModel):
     """Structured model for Disease information."""
 
     disease: str = Field(description="What disease we are interested in.")
-    date: str = Field(description="The date we are interested in.")
+    date: datetime = Field(description="The date we are interested in.")
     overall_index_question: str = Field(description="Overall index question.")
 
 def get_prompt(prompt_template_file: str, disease_data: DiseaseInformation) -> str:
@@ -37,7 +40,12 @@ def get_prompt(prompt_template_file: str, disease_data: DiseaseInformation) -> s
         A MarketRelevance object containing reasoning and score.
 
     """
-    env = Environment(loader=FileSystemLoader('.'), autoescape=True)
+    base_dir = path.dirname(path.abspath(__file__))
+    templates_dir = path.join(base_dir, "prompts")
+    env = Environment(
+        loader=FileSystemLoader(templates_dir),
+        autoescape=True
+    )
     template = env.get_template(prompt_template_file)
     return template.render(disease = disease_data.disease,
                            date = disease_data.date,

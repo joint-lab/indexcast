@@ -11,6 +11,7 @@ import time
 from datetime import UTC, datetime, timedelta
 
 import dagster as dg
+import numpy as np
 import requests
 from sqlalchemy import delete, func
 from sqlmodel import Session, select
@@ -627,7 +628,7 @@ def manifold_relevance_scores(context: dg.AssetExecutionContext) -> dg.Materiali
 
             # build text rep
             # make sure there were urls and fetching the contents did not result in an error
-            if len(url_text) > 0 and not "error" in url_text[:20].lower():
+            if len(url_text) > 0 and "error" not in url_text[:20].lower():
                 # trim for now to make sure not too many tokens
                 trimmed = url_text[:4875]
                 text_rep = f"""<Title>{title}</Title>
@@ -637,17 +638,21 @@ def manifold_relevance_scores(context: dg.AssetExecutionContext) -> dg.Materiali
                 text_rep = f"""<Title>{title}</Title>
                 <Description>{description}</Description>"""
 
-            # temporal_relevance
-            prompt = get_prompt("ml/prompts/temporal_relevnace_prompt.j2", disease_info)
-            temporal_relevance = relevance_score(prompt, text_rep, client)
+            temp = []
+            geo = []
+            index = []
+            for _i in range(10):
+                # temporal_relevance
+                prompt = get_prompt("temporal_relevance_prompt.j2", disease_info)
+                temp.append(relevance_score(prompt, text_rep, client).relevance_score)
 
-            # geographical_relevance
-            prompt = get_prompt("ml/prompts/geographical_relevance.j2", disease_info)
-            geographical_relevance = relevance_score(prompt, text_rep, client)
+                # geographical_relevance
+                prompt = get_prompt("geographic_relevance_prompt.j2", disease_info)
+                geo.append(relevance_score(prompt, text_rep, client).relevance_score)
 
-            # index_question_relevance
-            prompt = get_prompt("ml/prompts/index_question_relevance.j2", disease_info)
-            index_question_relevance = relevance_score(prompt, text_rep, client)
+                # index_question_relevance
+                prompt = get_prompt("index_question_relevance_prompt.j2", disease_info)
+                index.append(relevance_score(prompt, text_rep, client).relevance_score)
 
             to_insert = []
             for name, val in [
@@ -656,9 +661,9 @@ def manifold_relevance_scores(context: dg.AssetExecutionContext) -> dg.Materiali
                 ("volume_144h", volume_144h),
                 ("num_traders", num_traders),
                 ("num_comments", num_comments),
-                ("temporal_relevance", temporal_relevance),
-                ("geographical_relevance", geographical_relevance),
-                ("index_question_relevance", index_question_relevance),
+                ("temporal_relevance", np.mean(temp)),
+                ("geographical_relevance", np.mean(geo)),
+                ("index_question_relevance", np.mean(index)),
             ]:
                 type_id = score_type_map.get(name)
                 if type_id is None:
@@ -673,8 +678,9 @@ def manifold_relevance_scores(context: dg.AssetExecutionContext) -> dg.Materiali
                 )
 
             session.add_all(to_insert)
+            context.log.info(f"Scored market: {market_id}.")
 
-        session.commit()
+            session.commit()
 
     return dg.MaterializeResult(
         metadata={
