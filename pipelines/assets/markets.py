@@ -211,41 +211,45 @@ def get_volume(session: Session, market_id: str, query_time: datetime) -> float:
                           .where(MarketBet.created_time >= query_time)).one_or_none()
     return result or 0.0
 
+
 def fetch_text_from_url(
-        url: str,
-        retries: int = 3,
-        timeout: float = 60,
-        backoff: float = 5,
-        rate_limit_pause: float = 3
+    url: str,
+    retries: int = 3,
+    timeout: tuple = (5, 10),  # (connect_timeout, read_timeout)
+    backoff: float = 2,
+    rate_limit_pause: float = 0
 ) -> str:
     """
     Fetch LLM-friendly text from r.jina.ai with API key authorization.
 
     - url: target webpage (e.g. "https://example.com")
     - retries: number of retry attempts on timeout
-    - timeout: per-request read timeout (seconds)
-    - backoff: seconds to wait before each retry
+    - timeout: (connect, read) timeouts in seconds
+    - backoff: base seconds to wait (exponential backoff)
     - rate_limit_pause: optional pause after successful fetch (seconds)
     """
     endpoint = f"https://r.jina.ai/{url}"
 
-    for _attempt in range(1, retries + 1):
+    for attempt in range(1, retries + 1):
         try:
             resp = requests.get(endpoint, timeout=timeout)
             resp.raise_for_status()
-            text = resp.text
             if rate_limit_pause:
                 time.sleep(rate_limit_pause)
-            return text
+            return resp.text
 
         except requests.exceptions.ReadTimeout:
-            time.sleep(backoff)
+            if attempt < retries:
+                time.sleep(backoff * (2 ** (attempt - 1)))
+            else:
+                return "Error: read timeout after retries"
         except requests.exceptions.HTTPError:
-            return f"HTTP error {resp.status_code}: {resp.text}"
+            return f"HTTP error {resp.status_code}"
         except Exception as e:
             return f"Error: {e}"
 
     return "Error: failed after multiple retries"
+
 
 def extract_urls(text: str) -> list[str]:
     """
@@ -686,7 +690,7 @@ def relevance_temporal(context: dg.AssetExecutionContext) -> dg.MaterializeResul
             session.exec(
                 delete(MarketRelevanceScore)
                 .where(MarketRelevanceScore.market_id == market_id)
-                .where(MarketRelevanceScore.label == label_for_temp)  # only delete label temporal
+                .where(MarketRelevanceScore.score_type_id == label_for_temp)  # only delete label temporal
             )
 
             # use the disease information class from the ranker file for structured info
@@ -759,7 +763,7 @@ def relevance_geographical(context: dg.AssetExecutionContext) -> dg.MaterializeR
             session.exec(
                 delete(MarketRelevanceScore)
                 .where(MarketRelevanceScore.market_id == market_id)
-                .where(MarketRelevanceScore.label == label_for_geo)
+                .where(MarketRelevanceScore.score_type_id == label_for_geo)
             )
 
             # use the disease information class from the ranker file for structured info
@@ -831,7 +835,7 @@ def relevance_index_question(context: dg.AssetExecutionContext) -> dg.Materializ
             session.exec(
                 delete(MarketRelevanceScore)
                 .where(MarketRelevanceScore.market_id == market_id)
-                .where(MarketRelevanceScore.label == label_for_index)
+                .where(MarketRelevanceScore.score_type_id == label_for_index)
             )
 
             # use the disease information class from the ranker file for structured info

@@ -63,23 +63,23 @@ def avg_relevance_score(prompt: str, market_text_representation: str,
         client: An Instructor-enhanced OpenAI client.
 
     Returns:
-        A MarketRelevance object containing reasoning and score.
+        A float average score for ten responses.
 
     """
-    responses = client.chat.completions.create(
-        model="gpt-4.1-mini",
-        messages=[
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": market_text_representation}
-        ],
-        response_model=MarketRelevance,
-        # get 10 responses
-        n=10,
-        max_retries=3,
-        temperature=0.3
-    )
+    scores = []
+    for _ in range(10):
+        response = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": market_text_representation}
+            ],
+            response_model=MarketRelevance,
+            max_retries=3,
+            temperature=0.3
+        )
+        scores.append(response.relevance_score)
     # Calculate average score
-    scores = [r.relevance_score for r in responses]
     average_score = sum(scores) / len(scores)
     return average_score
 
