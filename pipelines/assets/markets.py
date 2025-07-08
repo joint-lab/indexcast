@@ -690,7 +690,8 @@ def relevance_temporal(context: dg.AssetExecutionContext) -> dg.MaterializeResul
             session.exec(
                 delete(MarketRelevanceScore)
                 .where(MarketRelevanceScore.market_id == market_id)
-                .where(MarketRelevanceScore.score_type_id == label_for_temp)  # only delete label temporal
+                # only delete label temporal
+                .where(MarketRelevanceScore.score_type_id == label_for_temp)
             )
 
             # use the disease information class from the ranker file for structured info
