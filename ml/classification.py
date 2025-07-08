@@ -23,6 +23,8 @@ class H5N1Classifier:
         base_dir = path.dirname(path.abspath(__file__))
         joblib_path = path.join(base_dir, "binary", "classifier_pipeline.joblib")
         self.classifier = joblib.load(joblib_path)
+        joblib_path2 = path.join(base_dir, "binary", "second_classifier_pipeline.joblib")
+        self.second_classifier = joblib.load(joblib_path2)
 
 
     def predict(self, market: Market) -> bool:
@@ -38,6 +40,7 @@ class H5N1Classifier:
         """
         encoded_market = self.model.encode(market.question).reshape(1, -1)
         if self.classifier.predict(encoded_market) == 1:
-            return True
+            if self.second_classifier.predict(encoded_market) == 1:
+                return True
         else:
             return False
