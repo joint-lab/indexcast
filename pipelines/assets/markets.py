@@ -11,14 +11,13 @@ import time
 from datetime import UTC, datetime, timedelta
 
 import dagster as dg
-import numpy as np
 import requests
 from sqlalchemy import delete, func
 from sqlmodel import Session, select
 
 from ml.classification import H5N1Classifier
 from ml.clients import get_client
-from ml.ranker import DiseaseInformation, get_prompt, relevance_score
+from ml.ranker import DiseaseInformation, avg_relevance_score, get_prompt
 from models.markets import (
     Market,
     MarketBet,
@@ -258,6 +257,37 @@ def extract_urls(text: str) -> list[str]:
     url_pattern = r'(https?://[^\s]+)'
     return re.findall(url_pattern, text)
 
+def text_rep(market: Market) -> str:
+    """
+    Create a text representation of the given market.
+
+    Returns a string representation of the given market.
+    """
+    # Extract the title and description
+    title = market.question
+    # make sure the description is not too long
+    description = market.description[:4875]
+
+    # if there are urls in the description, might need them to add context
+    urls = extract_urls(market.description)
+    url_text = ""
+    if len(urls) > 0:
+        for url in urls:
+            url_text += fetch_text_from_url(url)
+
+    # build text rep
+    # make sure there were urls and fetching the contents did not result in an error
+    if len(url_text) > 0 and "error" not in url_text[:20].lower():
+        # trim for now to make sure not too many tokens
+        trimmed = url_text[:4875]
+        text_rep = f"""<Title>{title}</Title>
+        <Description>{description}</Description> 
+        <Url Text>{trimmed}</Url Text> """
+    else:
+        text_rep = f"""<Title>{title}</Title>
+        <Description>{description}</Description>"""
+    return text_rep
+
 @dg.asset(
     required_resource_keys={"database_engine", "manifold_client"},
     description="Manifold markets table.",
@@ -440,13 +470,16 @@ def manifold_full_markets(context: dg.AssetExecutionContext) -> dg.MaterializeRe
     total_bets_updated = 0
 
     for m in market_ids:
-        # get description
+        # get description and text rep of the market
         full_market = manifold_client.full_market(m)
         with Session(context.resources.database_engine) as session:
             market = session.exec(
                 select(Market).where(Market.id == m)
             ).first()
             market.description = json.dumps(full_market.get("description"))
+
+            text = text_rep(market)
+            market.text_rep = text
             session.commit()
 
         # comments
@@ -543,13 +576,13 @@ def manifold_full_markets(context: dg.AssetExecutionContext) -> dg.MaterializeRe
 @dg.asset(
     deps=[manifold_full_markets],
     required_resource_keys={"database_engine"},
-    description="Relevance scores for the labeled markets.",
+    description="Relevance summary scores for the labeled markets.",
 )
-def manifold_relevance_scores(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
+def relevance_summary_statistics(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     """
-    Use bet/comments tables and client.py prompting to populate relevance_scores table.
+    Use bets and comments tables to populate relevance_scores table.
 
-    This asset looks at the labels table and for all labeled markets, it generates 8 relevance
+    This asset looks at the labels table and for all labeled markets, it generates 5 relevance
     scores and stores them in the database.
     """
     # get list of market ids that have been labeled
@@ -557,7 +590,7 @@ def manifold_relevance_scores(context: dg.AssetExecutionContext) -> dg.Materiali
         market_ids = session.exec(select(MarketLabel.market_id)).all()
     context.log.info(f"Found {len(market_ids)} labeled markets.")
 
-    # Load all score‐type rows once and build a name→id map
+    # Load all score‐type rows once and build a name id map
     with Session(context.resources.database_engine) as session:
         score_type_rows = session.exec(select(MarketRelevanceScoreType)).all()
     score_type_map = { row.score_name: row.id for row in score_type_rows }
@@ -565,11 +598,15 @@ def manifold_relevance_scores(context: dg.AssetExecutionContext) -> dg.Materiali
 
     with Session(context.resources.database_engine) as session:
         for market_id in market_ids:
-            # delete old row
+            # delete selected score types
+            types_to_delete = ["volume_24h", "num_comments", "volume_total",
+                               "volume_144h", "num_traders"]
+            type_ids = [score_type_map[name] for name in types_to_delete if name in score_type_map]
+
             session.exec(
                 delete(MarketRelevanceScore)
                 .where(MarketRelevanceScore.market_id == market_id)
-                .where(MarketRelevanceScore.score_type_id.in_(score_type_map.values()))
+                .where(MarketRelevanceScore.score_type_id.in_(type_ids))
             )
 
             # volume_total
@@ -589,6 +626,68 @@ def manifold_relevance_scores(context: dg.AssetExecutionContext) -> dg.Materiali
             num_comments = session.exec(select(func.count())
                 .where(MarketComment.market_id == market_id)).one_or_none() | 0
 
+            to_insert = []
+            for name, val in [
+                ("volume_total", volume_total),
+                ("volume_24h", volume_24h),
+                ("volume_144h", volume_144h),
+                ("num_traders", num_traders),
+                ("num_comments", num_comments)
+            ]:
+                type_id = score_type_map.get(name)
+                if type_id is None:
+                    raise ValueError(f"Unknown score type: {name}")
+
+                to_insert.append(
+                    MarketRelevanceScore(
+                        market_id=market_id,
+                        score_type_id=type_id,
+                        score_value=val,
+                    )
+                )
+
+            session.add_all(to_insert)
+            context.log.info(f"Scored market: {market_id}.")
+
+            session.commit()
+
+        return dg.MaterializeResult(
+            metadata={
+                "num_markets_processed": dg.MetadataValue.int(len(market_ids))
+            }
+        )
+
+
+@dg.asset(
+    deps=[manifold_full_markets],
+    required_resource_keys={"database_engine"},
+    description="Temporal relevance scores for the labeled markets.",
+)
+def relevance_temporal(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
+    """
+    Use client.py prompting to populate temporal relevance scores.
+
+    This asset looks at the labels table and for all labeled markets,
+    it generates temporal relevance scores and stores them in the database.
+    """
+    # get list of market ids that have been labeled
+    with Session(context.resources.database_engine) as session:
+        market_ids = session.exec(select(MarketLabel.market_id)).all()
+        label_for_temp = session.exec(
+            select(MarketRelevanceScoreType.id).where(
+                MarketRelevanceScoreType.score_name == "temporal_relevance"
+            )
+        ).first()
+    context.log.info(f"Found {len(market_ids)} labeled markets.")
+
+    with Session(context.resources.database_engine) as session:
+        for market_id in market_ids:
+            # delete old row
+            session.exec(
+                delete(MarketRelevanceScore)
+                .where(MarketRelevanceScore.market_id == market_id)
+                .where(MarketRelevanceScore.label == label_for_temp)  # only delete label temporal
+            )
 
             # use the disease information class from the ranker file for structured info
             # for prompting
@@ -614,71 +713,13 @@ def manifold_relevance_scores(context: dg.AssetExecutionContext) -> dg.Materiali
                 select(Market).where(Market.id == market_id)
             ).first()
 
-            # Extract the title and description
-            title = market.question
-            # make sure the description is not too long
-            description = market.description[:4875]
-
-            # if there are urls in the description, might need them to add context
-            urls = extract_urls(market.description)
-            url_text = ""
-            if len(urls) > 0:
-                for url in urls:
-                    url_text += fetch_text_from_url(url)
-
-            # build text rep
-            # make sure there were urls and fetching the contents did not result in an error
-            if len(url_text) > 0 and "error" not in url_text[:20].lower():
-                # trim for now to make sure not too many tokens
-                trimmed = url_text[:4875]
-                text_rep = f"""<Title>{title}</Title>
-                <Description>{description}</Description> 
-                <Url Text>{trimmed}</Url Text> """
-            else:
-                text_rep = f"""<Title>{title}</Title>
-                <Description>{description}</Description>"""
-
-            temp = []
-            geo = []
-            index = []
-            for _i in range(10):
-                # temporal_relevance
-                prompt = get_prompt("temporal_relevance_prompt.j2", disease_info)
-                temp.append(relevance_score(prompt, text_rep, client).relevance_score)
-
-                # geographical_relevance
-                prompt = get_prompt("geographic_relevance_prompt.j2", disease_info)
-                geo.append(relevance_score(prompt, text_rep, client).relevance_score)
-
-                # index_question_relevance
-                prompt = get_prompt("index_question_relevance_prompt.j2", disease_info)
-                index.append(relevance_score(prompt, text_rep, client).relevance_score)
-
-            to_insert = []
-            for name, val in [
-                ("volume_total", volume_total),
-                ("volume_24h", volume_24h),
-                ("volume_144h", volume_144h),
-                ("num_traders", num_traders),
-                ("num_comments", num_comments),
-                ("temporal_relevance", np.mean(temp)),
-                ("geographical_relevance", np.mean(geo)),
-                ("index_question_relevance", np.mean(index)),
-            ]:
-                type_id = score_type_map.get(name)
-                if type_id is None:
-                    raise ValueError(f"Unknown score type: {name}")
-
-                to_insert.append(
-                    MarketRelevanceScore(
-                        market_id=market_id,
-                        score_type_id=type_id,
-                        score_value=val,
-                    )
-                )
-
-            session.add_all(to_insert)
-            context.log.info(f"Scored market: {market_id}.")
+            prompt_temp = get_prompt("temporal_relevance_prompt.j2", disease_info)
+            session.add(MarketRelevanceScore(
+                market_id=market_id,
+                score_type_id=label_for_temp,
+                score_value= avg_relevance_score(prompt_temp, market.text_rep, client),
+            ))
+            context.log.info(f"Temporal relevance scored market: {market_id}.")
 
             session.commit()
 
@@ -688,3 +729,147 @@ def manifold_relevance_scores(context: dg.AssetExecutionContext) -> dg.Materiali
         }
     )
 
+
+@dg.asset(
+    deps=[manifold_full_markets],
+    required_resource_keys={"database_engine"},
+    description="Geographical relevance scores for the labeled markets.",
+)
+def relevance_geographical(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
+    """
+    Use client.py prompting to populate geographical relevance scores.
+
+    This asset looks at the labels table and for all labeled markets,
+    it generates geographical relevance scores and stores them in the database.
+    """
+    # get list of market ids that have been labeled
+    with Session(context.resources.database_engine) as session:
+        market_ids = session.exec(select(MarketLabel.market_id)).all()
+        label_for_geo = session.exec(
+            select(MarketRelevanceScoreType.id).where(
+                MarketRelevanceScoreType.score_name == "geographical_relevance"
+            )
+        ).first()
+
+    context.log.info(f"Found {len(market_ids)} labeled markets.")
+
+    with Session(context.resources.database_engine) as session:
+        for market_id in market_ids:
+            # delete old row
+            session.exec(
+                delete(MarketRelevanceScore)
+                .where(MarketRelevanceScore.market_id == market_id)
+                .where(MarketRelevanceScore.label == label_for_geo)
+            )
+
+            # use the disease information class from the ranker file for structured info
+            # for prompting
+            # Get the Market label name
+            market_label = session.exec(
+                select(MarketLabel).where(MarketLabel.market_id == market_id)
+            ).first()
+            label_name = market_label.label_type.label_name
+
+            # risk question for H5N1
+            question = "Will there be a massive H5N1 outbreak in the next 12 months?"
+
+            # date
+            todays_date = datetime.now(UTC)
+            disease_info = DiseaseInformation(
+                disease=label_name,
+                date=todays_date,
+                overall_index_question=question
+            )
+            # client
+            client = get_client()
+            market = session.exec(
+                select(Market).where(Market.id == market_id)
+            ).first()
+
+            prompt_temp = get_prompt("geographic_relevance_prompt.j2", disease_info)
+            session.add(MarketRelevanceScore(
+                market_id=market_id,
+                score_type_id= label_for_geo,
+                score_value= avg_relevance_score(prompt_temp, market.text_rep, client),
+            ))
+            context.log.info(f"Geographical relevance scored market: {market_id}.")
+
+            session.commit()
+
+    return dg.MaterializeResult(
+        metadata={
+            "num_markets_processed": dg.MetadataValue.int(len(market_ids))
+        }
+    )
+
+@dg.asset(
+    deps=[manifold_full_markets],
+    required_resource_keys={"database_engine"},
+    description="Index question relevance scores for the labeled markets.",
+)
+def relevance_index_question(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
+    """
+    Use client.py prompting to populate index question relevance scores.
+
+    This asset looks at the labels table and for all labeled markets,
+    it generates index question relevance scores and stores them in the database.
+    """
+    # get list of market ids that have been labeled
+    with Session(context.resources.database_engine) as session:
+        market_ids = session.exec(select(MarketLabel.market_id)).all()
+        label_for_index = session.exec(
+            select(MarketRelevanceScoreType.id).where(
+                MarketRelevanceScoreType.score_name == "index_question_relevance"
+            )
+        ).first()
+
+    context.log.info(f"Found {len(market_ids)} labeled markets.")
+
+    with Session(context.resources.database_engine) as session:
+        for market_id in market_ids:
+            # delete old row
+            session.exec(
+                delete(MarketRelevanceScore)
+                .where(MarketRelevanceScore.market_id == market_id)
+                .where(MarketRelevanceScore.label == label_for_index)
+            )
+
+            # use the disease information class from the ranker file for structured info
+            # for prompting
+            # Get the Market label name
+            market_label = session.exec(
+                select(MarketLabel).where(MarketLabel.market_id == market_id)
+            ).first()
+            label_name = market_label.label_type.label_name
+
+            # risk question for H5N1
+            question = "Will there be a massive H5N1 outbreak in the next 12 months?"
+
+            # date
+            todays_date = datetime.now(UTC)
+            disease_info = DiseaseInformation(
+                disease=label_name,
+                date=todays_date,
+                overall_index_question=question
+            )
+            # client
+            client = get_client()
+            market = session.exec(
+                select(Market).where(Market.id == market_id)
+            ).first()
+
+            prompt_temp = get_prompt("index_question_relevance_prompt.j2", disease_info)
+            session.add(MarketRelevanceScore(
+                market_id=market_id,
+                score_type_id= label_for_index,
+                score_value= avg_relevance_score(prompt_temp, market.text_rep, client),
+            ))
+            context.log.info(f"Index question relevance scored market: {market_id}.")
+
+            session.commit()
+
+    return dg.MaterializeResult(
+        metadata={
+            "num_markets_processed": dg.MetadataValue.int(len(market_ids))
+        }
+    )

@@ -52,8 +52,8 @@ def get_prompt(prompt_template_file: str, disease_data: DiseaseInformation) -> s
                            overall_index_question = disease_data.overall_index_question)
 
 
-def relevance_score(prompt: str, market_text_representation: str,
-                    client: instructor.Instructor) -> MarketRelevance:
+def avg_relevance_score(prompt: str, market_text_representation: str,
+                    client: instructor.Instructor) -> float:
     """
     Rank the relevance of a market description to a given prompt.
 
@@ -66,14 +66,21 @@ def relevance_score(prompt: str, market_text_representation: str,
         A MarketRelevance object containing reasoning and score.
 
     """
-    response = client.chat.completions.create(
+    responses = client.chat.completions.create(
         model="gpt-4.1-mini",
         messages=[
             {"role": "system", "content": prompt},
             {"role": "user", "content": market_text_representation}
         ],
         response_model=MarketRelevance,
+        # get 10 responses
+        n=10,
         max_retries=3,
         temperature=0.3
     )
-    return response
+    # Calculate average score
+    scores = [r.relevance_score for r in responses]
+    average_score = sum(scores) / len(scores)
+    return average_score
+
+
