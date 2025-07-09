@@ -14,6 +14,8 @@ import dagster as dg
 import requests
 from sqlalchemy import delete, func
 from sqlmodel import Session, select
+from filelock import FileLock
+from contextlib import contextmanager
 
 from ml.classification import H5N1Classifier
 from ml.clients import get_client
@@ -211,7 +213,6 @@ def get_volume(session: Session, market_id: str, query_time: datetime) -> float:
                           .where(MarketBet.created_time >= query_time)).one_or_none()
     return result or 0.0
 
-
 def fetch_text_from_url(
     url: str,
     retries: int = 3,
@@ -250,7 +251,6 @@ def fetch_text_from_url(
 
     return "Error: failed after multiple retries"
 
-
 def extract_urls(text: str) -> list[str]:
     """
     Find all HTTP/HTTPS URLs in the given text.
@@ -261,7 +261,7 @@ def extract_urls(text: str) -> list[str]:
     url_pattern = r'(https?://[^\s]+)'
     return re.findall(url_pattern, text)
 
-def text_rep(market: Market) -> str:
+def get_text_rep(market: Market) -> str:
     """
     Create a text representation of the given market.
 
@@ -291,6 +291,18 @@ def text_rep(market: Market) -> str:
         text_rep = f"""<Title>{title}</Title>
         <Description>{description}</Description>"""
     return text_rep
+
+
+# lock setup and helper function
+lock = FileLock("sqlite_db_write.lock")
+
+@contextmanager
+def locked_session(engine):
+    """Context manager that locks SQLite writes using file-based locking."""
+    with lock:
+        with Session(engine) as session:
+            yield session
+
 
 @dg.asset(
     required_resource_keys={"database_engine", "manifold_client"},
@@ -482,8 +494,8 @@ def manifold_full_markets(context: dg.AssetExecutionContext) -> dg.MaterializeRe
             ).first()
             market.description = json.dumps(full_market.get("description"))
 
-            text = text_rep(market)
-            market.text_rep = text
+            text_rep = get_text_rep(market)
+            market.text_rep = text_rep
             session.commit()
 
         # comments
@@ -600,7 +612,7 @@ def relevance_summary_statistics(context: dg.AssetExecutionContext) -> dg.Materi
     score_type_map = { row.score_name: row.id for row in score_type_rows }
     context.log.info(f"Found {len(score_type_map)} relevance label types.")
 
-    with Session(context.resources.database_engine) as session:
+    with locked_session(context.resources.database_engine) as session:
         for market_id in market_ids:
             # delete selected score types
             types_to_delete = ["volume_24h", "num_comments", "volume_total",
@@ -682,56 +694,58 @@ def relevance_temporal(context: dg.AssetExecutionContext) -> dg.MaterializeResul
                 MarketRelevanceScoreType.score_name == "temporal_relevance"
             )
         ).first()
+
     context.log.info(f"Found {len(market_ids)} labeled markets.")
 
-    with Session(context.resources.database_engine) as session:
-        for market_id in market_ids:
-            # delete old row
-            session.exec(
-                delete(MarketRelevanceScore)
-                .where(MarketRelevanceScore.market_id == market_id)
-                # only delete label temporal
-                .where(MarketRelevanceScore.score_type_id == label_for_temp)
-            )
+    scores_to_add = []
+    market_ids_to_delete = []
 
-            # use the disease information class from the ranker file for structured info
-            # for prompting
-            # Get the Market label name
+    for market_id in market_ids:
+        with Session(context.resources.database_engine) as session:
             market_label = session.exec(
                 select(MarketLabel).where(MarketLabel.market_id == market_id)
             ).first()
             label_name = market_label.label_type.label_name
 
-            # risk question for H5N1
-            question = "Will there be a massive H5N1 outbreak in the next 12 months?"
-
-            # date
-            todays_date = datetime.now(UTC)
-            disease_info = DiseaseInformation(
-                disease=label_name,
-                date=todays_date,
-                overall_index_question=question
-            )
-            # client
-            client = get_client()
             market = session.exec(
                 select(Market).where(Market.id == market_id)
             ).first()
 
-            prompt_temp = get_prompt("temporal_relevance_prompt.j2", disease_info)
-            session.add(MarketRelevanceScore(
-                market_id=market_id,
-                score_type_id=label_for_temp,
-                score_value= avg_relevance_score(prompt_temp, market.text_rep, client),
-            ))
-            context.log.info(f"Temporal relevance scored market: {market_id}.")
+        # use the disease information class from the ranker file for structured info
+        # for prompting
+        # Get the Market label name
+        todays_date = datetime.now(UTC)
+        disease_info = DiseaseInformation(
+            disease=label_name,
+            date=todays_date,
+            overall_index_question="Will there be a massive H5N1 outbreak in the next 12 months?"
+        )
+        prompt_temp = get_prompt("temporal_relevance_prompt.j2", disease_info)
+        client = get_client()
+        score_value = avg_relevance_score(prompt_temp, market.text_rep, client)
 
-            session.commit()
+        # Collect for batch write
+        scores_to_add.append(MarketRelevanceScore(
+            market_id=market_id,
+            score_type_id=label_for_temp,
+            score_value=score_value,
+        ))
+        market_ids_to_delete.append(market_id)
+        context.log.info(f"Temporal relevance computed for market: {market_id}.")
+
+    with locked_session(context.resources.database_engine) as session:
+        session.exec(
+            delete(MarketRelevanceScore)
+            .where(MarketRelevanceScore.market_id.in_(market_ids_to_delete))
+            .where(MarketRelevanceScore.score_type_id == label_for_temp)
+        )
+        session.add_all(scores_to_add)
+        session.commit()
+
+    context.log.info(f"All temporal relevance scores updated in DB.")
 
     return dg.MaterializeResult(
-        metadata={
-            "num_markets_processed": dg.MetadataValue.int(len(market_ids))
-        }
+        metadata={"num_markets_processed": dg.MetadataValue.int(len(market_ids))}
     )
 
 
@@ -758,54 +772,57 @@ def relevance_geographical(context: dg.AssetExecutionContext) -> dg.MaterializeR
 
     context.log.info(f"Found {len(market_ids)} labeled markets.")
 
-    with Session(context.resources.database_engine) as session:
-        for market_id in market_ids:
-            # delete old row
-            session.exec(
-                delete(MarketRelevanceScore)
-                .where(MarketRelevanceScore.market_id == market_id)
-                .where(MarketRelevanceScore.score_type_id == label_for_geo)
-            )
+    scores_to_add = []
+    market_ids_to_delete = []
 
-            # use the disease information class from the ranker file for structured info
-            # for prompting
-            # Get the Market label name
+    for market_id in market_ids:
+        with Session(context.resources.database_engine) as session:
             market_label = session.exec(
                 select(MarketLabel).where(MarketLabel.market_id == market_id)
             ).first()
             label_name = market_label.label_type.label_name
 
-            # risk question for H5N1
-            question = "Will there be a massive H5N1 outbreak in the next 12 months?"
-
-            # date
-            todays_date = datetime.now(UTC)
-            disease_info = DiseaseInformation(
-                disease=label_name,
-                date=todays_date,
-                overall_index_question=question
-            )
-            # client
-            client = get_client()
             market = session.exec(
                 select(Market).where(Market.id == market_id)
             ).first()
 
-            prompt_temp = get_prompt("geographic_relevance_prompt.j2", disease_info)
-            session.add(MarketRelevanceScore(
-                market_id=market_id,
-                score_type_id= label_for_geo,
-                score_value= avg_relevance_score(prompt_temp, market.text_rep, client),
-            ))
-            context.log.info(f"Geographical relevance scored market: {market_id}.")
+        # use the disease information class from the ranker file for structured info
+        # for prompting
+        # Get the Market label name
+        todays_date = datetime.now(UTC)
+        disease_info = DiseaseInformation(
+            disease=label_name,
+            date=todays_date,
+            overall_index_question="Will there be a massive H5N1 outbreak in the next 12 months?"
+        )
+        prompt_temp = get_prompt("geographic_relevance_prompt.j2", disease_info)
+        client = get_client()
+        score_value = avg_relevance_score(prompt_temp, market.text_rep, client)
 
-            session.commit()
+        # Collect for batch write
+        scores_to_add.append(MarketRelevanceScore(
+            market_id=market_id,
+            score_type_id=label_for_geo,
+            score_value=score_value,
+        ))
+        market_ids_to_delete.append(market_id)
+        context.log.info(f"Geographical relevance computed for market: {market_id}.")
+
+    with locked_session(context.resources.database_engine) as session:
+        session.exec(
+            delete(MarketRelevanceScore)
+            .where(MarketRelevanceScore.market_id.in_(market_ids_to_delete))
+            .where(MarketRelevanceScore.score_type_id == label_for_geo)
+        )
+        session.add_all(scores_to_add)
+        session.commit()
+
+    context.log.info(f"All geographical relevance scores updated in DB.")
 
     return dg.MaterializeResult(
-        metadata={
-            "num_markets_processed": dg.MetadataValue.int(len(market_ids))
-        }
+        metadata={"num_markets_processed": dg.MetadataValue.int(len(market_ids))}
     )
+
 
 @dg.asset(
     deps=[manifold_full_markets],
@@ -830,51 +847,53 @@ def relevance_index_question(context: dg.AssetExecutionContext) -> dg.Materializ
 
     context.log.info(f"Found {len(market_ids)} labeled markets.")
 
-    with Session(context.resources.database_engine) as session:
-        for market_id in market_ids:
-            # delete old row
-            session.exec(
-                delete(MarketRelevanceScore)
-                .where(MarketRelevanceScore.market_id == market_id)
-                .where(MarketRelevanceScore.score_type_id == label_for_index)
-            )
+    scores_to_add = []
+    market_ids_to_delete = []
 
-            # use the disease information class from the ranker file for structured info
-            # for prompting
-            # Get the Market label name
+    for market_id in market_ids:
+        with Session(context.resources.database_engine) as session:
             market_label = session.exec(
                 select(MarketLabel).where(MarketLabel.market_id == market_id)
             ).first()
             label_name = market_label.label_type.label_name
 
-            # risk question for H5N1
-            question = "Will there be a massive H5N1 outbreak in the next 12 months?"
-
-            # date
-            todays_date = datetime.now(UTC)
-            disease_info = DiseaseInformation(
-                disease=label_name,
-                date=todays_date,
-                overall_index_question=question
-            )
-            # client
-            client = get_client()
             market = session.exec(
                 select(Market).where(Market.id == market_id)
             ).first()
 
-            prompt_temp = get_prompt("index_question_relevance_prompt.j2", disease_info)
-            session.add(MarketRelevanceScore(
-                market_id=market_id,
-                score_type_id= label_for_index,
-                score_value= avg_relevance_score(prompt_temp, market.text_rep, client),
-            ))
-            context.log.info(f"Index question relevance scored market: {market_id}.")
+        # use the disease information class from the ranker file for structured info
+        # for prompting
+        # Get the Market label name
+        todays_date = datetime.now(UTC)
+        disease_info = DiseaseInformation(
+            disease=label_name,
+            date=todays_date,
+            overall_index_question="Will there be a massive H5N1 outbreak in the next 12 months?"
+        )
+        prompt_temp = get_prompt("index_question_relevance_prompt.j2", disease_info)
+        client = get_client()
+        score_value = avg_relevance_score(prompt_temp, market.text_rep, client)
 
-            session.commit()
+        # Collect for batch write
+        scores_to_add.append(MarketRelevanceScore(
+            market_id=market_id,
+            score_type_id=label_for_index,
+            score_value=score_value,
+        ))
+        market_ids_to_delete.append(market_id)
+        context.log.info(f"Index question relevance computed for market: {market_id}.")
+
+    with locked_session(context.resources.database_engine) as session:
+        session.exec(
+            delete(MarketRelevanceScore)
+            .where(MarketRelevanceScore.market_id.in_(market_ids_to_delete))
+            .where(MarketRelevanceScore.score_type_id == label_for_index)
+        )
+        session.add_all(scores_to_add)
+        session.commit()
+
+    context.log.info(f"All index question relevance scores updated in DB.")
 
     return dg.MaterializeResult(
-        metadata={
-            "num_markets_processed": dg.MetadataValue.int(len(market_ids))
-        }
+        metadata={"num_markets_processed": dg.MetadataValue.int(len(market_ids))}
     )

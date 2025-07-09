@@ -8,6 +8,7 @@ dependencies = [
     "alembic>=1.16.1",
     "dagster>=1.10.20",
     "dagster-webserver>=1.10.20",
+    "filelock>=3.18.0",
     "instructor>=1.8.3",
     "openai>=1.86.0",
     "pydantic>=2.11.7",

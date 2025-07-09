@@ -8,6 +8,7 @@ Authors:
 import os
 
 import dagster as dg
+from sqlalchemy import event
 from sqlalchemy.engine import Engine
 from sqlmodel import create_engine
 
@@ -25,4 +26,14 @@ def sqlite_db_resource(context: dg.InitResourceContext) -> Engine:
 
     # Connect to the SQLite DB
     engine = create_engine(f'sqlite:///{db_path}')
+
+
+    # Set PRAGMA journal_mode=WAL on each new DBAPI connection
+    @event.listens_for(engine, "connect")
+    def set_sqlite_pragma(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL;")
+        cursor.close()
+
     return engine
+
