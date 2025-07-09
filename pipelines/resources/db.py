@@ -6,10 +6,13 @@ Authors:
 - Erik Arnold <ernold@uvm.edu>
 """
 import os
+from contextlib import contextmanager
 
 import dagster as dg
+from filelock import FileLock
+from sqlalchemy import event
 from sqlalchemy.engine import Engine
-from sqlmodel import create_engine
+from sqlmodel import Session, create_engine
 
 
 @dg.resource
@@ -25,4 +28,24 @@ def sqlite_db_resource(context: dg.InitResourceContext) -> Engine:
 
     # Connect to the SQLite DB
     engine = create_engine(f'sqlite:///{db_path}')
+
+
+    # Set PRAGMA journal_mode=WAL on each new DBAPI connection
+    @event.listens_for(engine, "connect")
+    def set_sqlite_pragma(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL;")
+        cursor.close()
+
     return engine
+
+
+LOCK_PATH = "sqlite_db_write.lock"
+lock = FileLock(LOCK_PATH)
+
+@contextmanager
+def locked_session(engine):
+    """Context manager that locks SQLite writes using file-based locking."""
+    with lock:
+        with Session(engine) as session:
+            yield session

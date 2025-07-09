@@ -28,6 +28,7 @@ class Market(SQLModel, table=True):
     # content
     question: str
     description: str | None = None #json
+    text_rep: str | None = None
 
     # trading summaries
     probability: float | None = None  # multiple choice markets don't have a probability

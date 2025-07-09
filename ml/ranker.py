@@ -6,6 +6,9 @@ Authors:
 - Erik Arnold <ewarnold@uvm.edu>
 """
 
+from datetime import datetime
+from os import path
+
 import instructor
 from jinja2 import Environment, FileSystemLoader
 from pydantic import BaseModel, Field
@@ -22,7 +25,7 @@ class DiseaseInformation(BaseModel):
     """Structured model for Disease information."""
 
     disease: str = Field(description="What disease we are interested in.")
-    date: str = Field(description="The date we are interested in.")
+    date: datetime = Field(description="The date we are interested in.")
     overall_index_question: str = Field(description="Overall index question.")
 
 def get_prompt(prompt_template_file: str, disease_data: DiseaseInformation) -> str:
@@ -37,15 +40,20 @@ def get_prompt(prompt_template_file: str, disease_data: DiseaseInformation) -> s
         A MarketRelevance object containing reasoning and score.
 
     """
-    env = Environment(loader=FileSystemLoader('.'), autoescape=True)
+    base_dir = path.dirname(path.abspath(__file__))
+    templates_dir = path.join(base_dir, "prompts")
+    env = Environment(
+        loader=FileSystemLoader(templates_dir),
+        autoescape=True
+    )
     template = env.get_template(prompt_template_file)
     return template.render(disease = disease_data.disease,
                            date = disease_data.date,
                            overall_index_question = disease_data.overall_index_question)
 
 
-def relevance_score(prompt: str, market_text_representation: str,
-                    client: instructor.Instructor) -> MarketRelevance:
+def avg_relevance_score(prompt: str, market_text_representation: str,
+                    client: instructor.Instructor) -> float:
     """
     Rank the relevance of a market description to a given prompt.
 
@@ -55,19 +63,24 @@ def relevance_score(prompt: str, market_text_representation: str,
         client: An Instructor-enhanced OpenAI client.
 
     Returns:
-        A MarketRelevance object containing reasoning and score.
+        A float average score for ten responses.
 
     """
-    response = client.chat.completions.create(
-        model="gpt-4.1-nano",
-        messages=[
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": market_text_representation}
-        ],
-        response_model=MarketRelevance,
-        max_retries=3,
-        temperature=0.3
-    )
-    return response
+    scores = []
+    for _ in range(10):
+        response = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": market_text_representation}
+            ],
+            response_model=MarketRelevance,
+            max_retries=3,
+            temperature=0.3
+        )
+        scores.append(response.relevance_score)
+    # Calculate average score
+    average_score = sum(scores) / len(scores)
+    return average_score
 
 
