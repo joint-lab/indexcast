@@ -45,7 +45,6 @@ class H5N1Classifier:
         """
         encoded_market = self.model.encode(market.question).reshape(1, -1)
         if self.initial_classifier.predict(encoded_market) == 1:
-            if self.relevance_classifier.predict(encoded_market) == 1:
-                return True
+            return self.relevance_classifier.predict(encoded_market) == 1
         else:
             return False
