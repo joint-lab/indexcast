@@ -8,12 +8,10 @@ Authors:
 import json
 import re
 import time
-from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 
 import dagster as dg
 import requests
-from filelock import FileLock
 from sqlalchemy import delete, func
 from sqlmodel import Session, select
 
@@ -30,6 +28,7 @@ from models.markets import (
     MarketRelevanceScoreType,
     MarketUpdate,
 )
+from pipelines.resources.db import locked_session
 
 
 def _safe_fromtimestamp(ms: int) -> datetime | None:
@@ -291,17 +290,6 @@ def get_text_rep(market: Market) -> str:
         text_rep = f"""<Title>{title}</Title>
         <Description>{description}</Description>"""
     return text_rep
-
-
-# lock setup and helper function
-lock = FileLock("sqlite_db_write.lock")
-
-@contextmanager
-def locked_session(engine):
-    """Context manager that locks SQLite writes using file-based locking."""
-    with lock:
-        with Session(engine) as session:
-            yield session
 
 
 @dg.asset(
