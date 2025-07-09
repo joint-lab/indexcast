@@ -8,14 +8,14 @@ Authors:
 import json
 import re
 import time
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 
 import dagster as dg
 import requests
+from filelock import FileLock
 from sqlalchemy import delete, func
 from sqlmodel import Session, select
-from filelock import FileLock
-from contextlib import contextmanager
 
 from ml.classification import H5N1Classifier
 from ml.clients import get_client
@@ -742,7 +742,7 @@ def relevance_temporal(context: dg.AssetExecutionContext) -> dg.MaterializeResul
         session.add_all(scores_to_add)
         session.commit()
 
-    context.log.info(f"All temporal relevance scores updated in DB.")
+    context.log.info("All temporal relevance scores updated in DB.")
 
     return dg.MaterializeResult(
         metadata={"num_markets_processed": dg.MetadataValue.int(len(market_ids))}
@@ -817,7 +817,7 @@ def relevance_geographical(context: dg.AssetExecutionContext) -> dg.MaterializeR
         session.add_all(scores_to_add)
         session.commit()
 
-    context.log.info(f"All geographical relevance scores updated in DB.")
+    context.log.info("All geographical relevance scores updated in DB.")
 
     return dg.MaterializeResult(
         metadata={"num_markets_processed": dg.MetadataValue.int(len(market_ids))}
@@ -892,7 +892,7 @@ def relevance_index_question(context: dg.AssetExecutionContext) -> dg.Materializ
         session.add_all(scores_to_add)
         session.commit()
 
-    context.log.info(f"All index question relevance scores updated in DB.")
+    context.log.info("All index question relevance scores updated in DB.")
 
     return dg.MaterializeResult(
         metadata={"num_markets_processed": dg.MetadataValue.int(len(market_ids))}
