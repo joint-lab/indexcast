@@ -434,7 +434,6 @@ def market_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
                 market_update = MarketUpdate(
                     market_id=market_id,
                     classified_at=current_time
-                    # reranked_at will use default value (None)
                 )
                 session.add(market_update)
 
@@ -466,14 +465,18 @@ def manifold_full_markets(context: dg.AssetExecutionContext) -> dg.MaterializeRe
     # Manifold API client
     manifold_client = context.resources.manifold_client
 
-    # get list of market ids that have been labeled
+    # get list of market ids that have been labeled H5N1
     with Session(context.resources.database_engine) as session:
-        market_ids = session.exec(select(MarketLabel.market_id)).all()
-    context.log.info(f"Found {len(market_ids)} labeled markets.")
+        h5n1_market_ids = session.exec(
+            select(MarketLabel.market_id)
+            .join(MarketLabelType, MarketLabel.label_type_id == MarketLabelType.id)
+            .where(MarketLabelType.label_name == "h5n1")
+        ).all()
+    context.log.info(f"Found {len(h5n1_market_ids)} h5n1 labeled markets.")
     total_comments_inserted = 0
     total_bets_updated = 0
 
-    for m in market_ids:
+    for m in h5n1_market_ids:
         # get description and text rep of the market
         full_market = manifold_client.full_market(m)
         with Session(context.resources.database_engine) as session:
@@ -570,7 +573,7 @@ def manifold_full_markets(context: dg.AssetExecutionContext) -> dg.MaterializeRe
 
     return dg.MaterializeResult(
         metadata={
-            "num_markets_processed": dg.MetadataValue.int(len(market_ids)),
+            "num_markets_processed": dg.MetadataValue.int(len(h5n1_market_ids)),
             "total_comments_inserted": dg.MetadataValue.int(total_comments_inserted),
             "total_bets_updated": dg.MetadataValue.int(total_bets_updated),
         }
@@ -606,7 +609,8 @@ def relevance_summary_statistics(context: dg.AssetExecutionContext) -> dg.Materi
             types_to_delete = ["volume_24h", "num_comments", "volume_total",
                                "volume_144h", "num_traders"]
             type_ids = [score_type_map[name] for name in types_to_delete if name in score_type_map]
-
+            row = session.get(MarketUpdate, market_id)
+            row.market_data_relevances_recorded_at = datetime.now(UTC)
             session.exec(
                 delete(MarketRelevanceScore)
                 .where(MarketRelevanceScore.market_id == market_id)
@@ -722,6 +726,10 @@ def relevance_temporal(context: dg.AssetExecutionContext) -> dg.MaterializeResul
         context.log.info(f"Temporal relevance computed for market: {market_id}.")
 
     with locked_session(context.resources.database_engine) as session:
+        for m in market_ids_to_delete:
+            row = session.get(MarketUpdate, m.id)
+            row.temp_relevance_scored_at = datetime.now(UTC)
+
         session.exec(
             delete(MarketRelevanceScore)
             .where(MarketRelevanceScore.market_id.in_(market_ids_to_delete))
@@ -797,6 +805,10 @@ def relevance_geographical(context: dg.AssetExecutionContext) -> dg.MaterializeR
         context.log.info(f"Geographical relevance computed for market: {market_id}.")
 
     with locked_session(context.resources.database_engine) as session:
+        for m in market_ids_to_delete:
+            row = session.get(MarketUpdate, m.id)
+            row.geo_relevance_scored_at = datetime.now(UTC)
+
         session.exec(
             delete(MarketRelevanceScore)
             .where(MarketRelevanceScore.market_id.in_(market_ids_to_delete))
@@ -872,6 +884,10 @@ def relevance_index_question(context: dg.AssetExecutionContext) -> dg.Materializ
         context.log.info(f"Index question relevance computed for market: {market_id}.")
 
     with locked_session(context.resources.database_engine) as session:
+        for m in market_ids_to_delete:
+            row = session.get(MarketUpdate, m.id)
+            row.index_question_relevance_scored_at = datetime.now(UTC)
+
         session.exec(
             delete(MarketRelevanceScore)
             .where(MarketRelevanceScore.market_id.in_(market_ids_to_delete))
@@ -907,29 +923,28 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
         h5n1_label_type_id = h5n1_result.id
         rule_eligible_label_type_id = rule_eligible_result.id
 
-    # Only process markets that are labeled h5n1 and binary
-    with Session(context.resources.database_engine) as session:
+        # Only process markets that are labeled h5n1
         markets_to_process = session.exec(
             select(Market)
             .outerjoin(MarketLabel, Market.id == MarketLabel.market_id)
             .where(
-                (MarketLabel.label_type_id == h5n1_label_type_id) &
-                (Market.outcome_type == "BINARY")
+                MarketLabel.label_type_id == h5n1_label_type_id
             )
         ).all()
 
         num_markets_processed = len(markets_to_process)
         context.log.info(
-            f"Found {num_markets_processed} BINARY h5n1 markets needing eligibility classification."
+            f"Found {num_markets_processed} h5n1 markets needing eligibility classification."
         )
 
-    with Session(context.resources.database_engine) as session:
         score_type_ids = {}
-        score_names = ["temporal_relevance", "geographical_relevance", "index_question_relevance"]
+        score_names = ["temporal_relevance", "geographical_relevance",
+                       "index_question_relevance", "volume_total"]
 
         for score_name in score_names:
             result = session.exec(
-                select(MarketRelevanceScoreType).where(MarketRelevanceScoreType.score_name == score_name)
+                select(MarketRelevanceScoreType)
+                .where(MarketRelevanceScoreType.score_name == score_name)
             ).first()
 
             if result:
@@ -939,6 +954,8 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
 
     temporal_score_type_id = score_type_ids["temporal_relevance"]
     geo_score_type_id = score_type_ids["geographical_relevance"]
+    question_score_type_id = score_type_ids["index_question_relevance"]
+    volume_score_type_id = score_type_ids["volume_total"]
 
     # Fetch all relevance scores for these markets
     market_ids = [m.id for m in markets_to_process]
@@ -946,6 +963,7 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
         temporal_score_type_id,
         geo_score_type_id,
         question_score_type_id,
+        volume_score_type_id,
     }
 
     with Session(context.resources.database_engine) as session:
@@ -966,19 +984,47 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
     # Apply classification logic
     classification_results = []
     eligibility_classifier = RuleEligibilityClassifier()
+    # this threshold is determined using calibration city
+    # for manifold volume under 400 mana is not calibrated enough
+    volume_threshold = 400
     num_skipped = 0
     for m in markets_to_process:
+        with Session(context.resources.database_engine) as session:
+            row = session.get(MarketUpdate, m.id)
+            row.rule_eligibility_at = datetime.now(UTC)
+            session.commit()
+
         temp_score = score_lookup.get((m.id, temporal_score_type_id))
         geo_score = score_lookup.get((m.id, geo_score_type_id))
         question_score = score_lookup.get((m.id, question_score_type_id))
+        volume_score = score_lookup.get((m.id, volume_score_type_id))
 
+        # Check binary and volume threshold first
+        if m.outcome_type != "BINARY":
+            context.log.info(f"Market {m.id} is NOT BINARY; marking as not eligible.")
+            classification_results.append((m.id, False))
+            continue
+
+        if volume_score is None:
+            context.log.warning(f"Missing volume score for market {m.id}; skipping classification.")
+            num_skipped += 1
+            continue
+
+        if volume_score < volume_threshold:
+            context.log.info(f"Market {m.id} has low volume ({volume_score}); not eligible.")
+            classification_results.append((m.id, False))
+            continue
+
+        # Skip if relevance scores are missing
         if None in (temp_score, geo_score, question_score):
             context.log.warning(f"Missing score(s) for market {m.id}; skipping classification.")
             num_skipped += 1
             continue
 
+
         prediction = eligibility_classifier.predict(temp_score, geo_score, question_score)
         classification_results.append((m.id, prediction))
+
     num_markets_eligible = sum(1 for _, is_eligible in classification_results if is_eligible)
 
     # Update classification results in the database

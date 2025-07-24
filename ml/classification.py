@@ -8,6 +8,7 @@ Authors:
 from os import path
 
 import joblib
+import pandas as pd
 from sentence_transformers import SentenceTransformer
 
 from models.markets import Market, MarketRelevanceScore
@@ -54,13 +55,13 @@ class RuleEligibilityClassifier:
     """Classifier for rule eligibility of h5n1 markets."""
 
     def __init__(self):
-        """Initialize H5N1Classifier."""
-        # initial classifier trained from the market_classification_summary.ipynb
-        # in notebooks directory this classifier gets all markets that could be relating to H5N1
+        """Initialize RuleEligibilityClassifier."""
+        # initial model trained from the MLP notebook in notebooks directory
+        # this model scores markets on current relevance
         base_dir = path.dirname(path.abspath(__file__))
-        path_to_initial_classifier = path.join(base_dir, "binary",
+        path_to_initial_model = path.join(base_dir, "binary",
                                                "pre-prompting-relevance-filter.joblib")
-        self.eligibility_classifier = joblib.load(path_to_initial_classifier)
+        self.eligibility_classifier = joblib.load(path_to_initial_model)
 
 
     def predict(self, temp_score: MarketRelevanceScore, geo_score: MarketRelevanceScore,
@@ -77,4 +78,11 @@ class RuleEligibilityClassifier:
             bool: True if the market is eligible, False otherwise.
 
         """
-        return (self.eligibility_classifier.predict([[temp_score, geo_score, question_score]]))[0] >= 12
+        # the threshold of 12 is determined by the exploration in MLP notebook
+        # in the notebooks directory
+        new_input = pd.DataFrame([{
+            'temporal_relevance': temp_score,
+            'geographical_relevance': geo_score,
+            'index_question_relevance': question_score
+        }])
+        return self.eligibility_classifier.predict(new_input)[0] >= 12

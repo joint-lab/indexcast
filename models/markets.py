@@ -206,7 +206,11 @@ class MarketUpdate(SQLModel, table=True):
     market_id: str = Field(primary_key=True, foreign_key="markets.id")
     classified_at: datetime | None = None
     full_market_at: datetime | None = None
-    reranked_at: datetime | None = None
+    market_data_relevances_recorded_at: datetime | None = None
+    temp_relevance_scored_at: datetime | None = None
+    geo_relevance_scored_at: datetime | None = None
+    index_question_relevance_scored_at: datetime | None = None
+    rule_eligibility_at: datetime | None = None
 
     # Relationships
     market: "Market" = Relationship(back_populates="updates")

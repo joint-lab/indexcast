@@ -24,6 +24,9 @@ class ManifoldClient:
         retries = Retry(
             total=5,
             backoff_factor=0.1,
+            status_forcelist=[503],  # Retry on 503 errors
+            allowed_methods=["GET"],
+            raise_on_status=False,
         )
         adapter = HTTPAdapter(max_retries=retries)
         self.session.mount("https://", adapter)
