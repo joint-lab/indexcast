@@ -15,7 +15,7 @@ import requests
 from sqlalchemy import delete, func
 from sqlmodel import Session, select
 
-from ml.classification import H5N1Classifier
+from ml.classification import H5N1Classifier, RuleEligibilityClassifier
 from ml.clients import get_client
 from ml.ranker import DiseaseInformation, avg_relevance_score, get_prompt
 from models.markets import (
@@ -885,3 +885,131 @@ def relevance_index_question(context: dg.AssetExecutionContext) -> dg.Materializ
     return dg.MaterializeResult(
         metadata={"num_markets_processed": dg.MetadataValue.int(len(market_ids))}
     )
+
+
+
+@dg.asset(
+    deps=[relevance_index_question, relevance_geographical, relevance_temporal],
+    required_resource_keys={"database_engine"},
+    description="Market eligibility labels."
+)
+def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
+    """Generate new market rule eligibility labels when materialized."""
+    # Obtain id of h5n1 label type and eligible label type
+    with Session(context.resources.database_engine) as session:
+        h5n1_result = session.exec(
+            select(MarketLabelType).where(MarketLabelType.label_name == "h5n1")
+        ).first()
+        rule_eligible_result = session.exec(
+            select(MarketLabelType).where(MarketLabelType.label_name == "rule_eligible")
+        ).first()
+
+        h5n1_label_type_id = h5n1_result.id
+        rule_eligible_label_type_id = rule_eligible_result.id
+
+    # Only process markets that are labeled h5n1 and binary
+    with Session(context.resources.database_engine) as session:
+        markets_to_process = session.exec(
+            select(Market)
+            .outerjoin(MarketLabel, Market.id == MarketLabel.market_id)
+            .where(
+                (MarketLabel.label_type_id == h5n1_label_type_id) &
+                (Market.outcome_type == "BINARY")
+            )
+        ).all()
+
+        num_markets_processed = len(markets_to_process)
+        context.log.info(
+            f"Found {num_markets_processed} BINARY h5n1 markets needing eligibility classification."
+        )
+
+    with Session(context.resources.database_engine) as session:
+        score_type_ids = {}
+        score_names = ["temporal_relevance", "geographical_relevance", "index_question_relevance"]
+
+        for score_name in score_names:
+            result = session.exec(
+                select(MarketRelevanceScoreType).where(MarketRelevanceScoreType.score_name == score_name)
+            ).first()
+
+            if result:
+                score_type_ids[score_name] = result.id
+            else:
+                context.log.warning(f"Missing score type for {score_name}")
+
+    temporal_score_type_id = score_type_ids["temporal_relevance"]
+    geo_score_type_id = score_type_ids["geographical_relevance"]
+
+    # Fetch all relevance scores for these markets
+    market_ids = [m.id for m in markets_to_process]
+    score_type_ids_set = {
+        temporal_score_type_id,
+        geo_score_type_id,
+        question_score_type_id,
+    }
+
+    with Session(context.resources.database_engine) as session:
+        all_scores = session.exec(
+            select(MarketRelevanceScore)
+            .where(
+                (MarketRelevanceScore.market_id.in_(market_ids)) &
+                (MarketRelevanceScore.score_type_id.in_(score_type_ids_set))
+            )
+        ).all()
+
+    # Organize as a lookup table: (market_id, score_type_id) -> score_value
+    score_lookup = {
+        (score.market_id, score.score_type_id): score.score_value
+        for score in all_scores
+    }
+
+    # Apply classification logic
+    classification_results = []
+    eligibility_classifier = RuleEligibilityClassifier()
+    num_skipped = 0
+    for m in markets_to_process:
+        temp_score = score_lookup.get((m.id, temporal_score_type_id))
+        geo_score = score_lookup.get((m.id, geo_score_type_id))
+        question_score = score_lookup.get((m.id, question_score_type_id))
+
+        if None in (temp_score, geo_score, question_score):
+            context.log.warning(f"Missing score(s) for market {m.id}; skipping classification.")
+            num_skipped += 1
+            continue
+
+        prediction = eligibility_classifier.predict(temp_score, geo_score, question_score)
+        classification_results.append((m.id, prediction))
+    num_markets_eligible = sum(1 for _, is_eligible in classification_results if is_eligible)
+
+    # Update classification results in the database
+    with Session(context.resources.database_engine) as session:
+        for (market_id, is_eligible) in classification_results:
+            # Update market labels
+            existing_label = session.exec(
+                select(MarketLabel).where(
+                    (MarketLabel.market_id == market_id) &
+                    (MarketLabel.label_type_id == rule_eligible_label_type_id)
+                )
+            ).first()
+
+            if is_eligible and not existing_label:
+                # Add label if classified as eligible and label does not exist
+                market_label = MarketLabel(
+                    market_id=market_id,
+                    label_type_id=rule_eligible_label_type_id
+                )
+                session.add(market_label)
+            elif not is_eligible and existing_label:
+                # Remove label if not classified as eligible and label exists
+                session.delete(existing_label)
+
+        session.commit()
+
+    return dg.MaterializeResult(
+        metadata={
+            "num_markets_processed": dg.MetadataValue.int(num_markets_processed),
+            "num_markets_eligible": dg.MetadataValue.int(num_markets_eligible),
+            "num_markets_skipped": dg.MetadataValue.int(num_skipped),
+        }
+    )
+

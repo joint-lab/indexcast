@@ -10,7 +10,7 @@ from os import path
 import joblib
 from sentence_transformers import SentenceTransformer
 
-from models.markets import Market
+from models.markets import Market, MarketRelevanceScore
 
 
 class H5N1Classifier:
@@ -48,3 +48,33 @@ class H5N1Classifier:
             return self.relevance_classifier.predict(encoded_market) == 1
         else:
             return False
+
+
+class RuleEligibilityClassifier:
+    """Classifier for rule eligibility of h5n1 markets."""
+
+    def __init__(self):
+        """Initialize H5N1Classifier."""
+        # initial classifier trained from the market_classification_summary.ipynb
+        # in notebooks directory this classifier gets all markets that could be relating to H5N1
+        base_dir = path.dirname(path.abspath(__file__))
+        path_to_initial_classifier = path.join(base_dir, "binary",
+                                               "pre-prompting-relevance-filter.joblib")
+        self.eligibility_classifier = joblib.load(path_to_initial_classifier)
+
+
+    def predict(self, temp_score: MarketRelevanceScore, geo_score: MarketRelevanceScore,
+                question_score: MarketRelevanceScore) -> bool:
+        """
+        Decide whether a market is eligible for rule generation.
+
+        Args:
+            temp_score (MarketRelevanceScore): The temp relevance score of the market.
+            geo_score (MarketRelevanceScore): The geo relevance score of the market.
+            question_score (MarketRelevanceScore): The question relevance score of the market.
+
+        Returns:
+            bool: True if the market is eligible, False otherwise.
+
+        """
+        return (self.eligibility_classifier.predict([[temp_score, geo_score, question_score]]))[0] >= 12
