@@ -727,7 +727,7 @@ def relevance_temporal(context: dg.AssetExecutionContext) -> dg.MaterializeResul
 
     with locked_session(context.resources.database_engine) as session:
         for m in market_ids_to_delete:
-            row = session.get(MarketUpdate, m.id)
+            row = session.get(MarketUpdate, m)
             row.temp_relevance_scored_at = datetime.now(UTC)
 
         session.exec(
@@ -806,7 +806,7 @@ def relevance_geographical(context: dg.AssetExecutionContext) -> dg.MaterializeR
 
     with locked_session(context.resources.database_engine) as session:
         for m in market_ids_to_delete:
-            row = session.get(MarketUpdate, m.id)
+            row = session.get(MarketUpdate, m)
             row.geo_relevance_scored_at = datetime.now(UTC)
 
         session.exec(
@@ -885,7 +885,7 @@ def relevance_index_question(context: dg.AssetExecutionContext) -> dg.Materializ
 
     with locked_session(context.resources.database_engine) as session:
         for m in market_ids_to_delete:
-            row = session.get(MarketUpdate, m.id)
+            row = session.get(MarketUpdate, m)
             row.index_question_relevance_scored_at = datetime.now(UTC)
 
         session.exec(
