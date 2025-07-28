@@ -23,11 +23,7 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     """Insert eligibility label."""
     op.execute("""
-        INSERT INTO market_label_types (label_name)
-        SELECT 'rule_eligible'
-        WHERE NOT EXISTS (
-            SELECT 2 FROM market_label_types WHERE label_name = 'rule_eligible'
-        )
+        INSERT INTO market_label_types (label_name) VALUES ('rule_eligible')
     """)
 
 def downgrade() -> None:
