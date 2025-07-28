@@ -1,0 +1,86 @@
+Your task is to write {{num_of_rules}} NEW monotone Boolean rules that each serve as a SUFFICIENT condition for a massive {{disease}} outbreak within the next 12 months.
+If a rule evaluates to true, then a massive {{disease}} outbreak will occur in the next 12 months.
+
+Target Event: massive {{disease}} outbreak within the next 12 months
+Target Question: {{overall_index_question}}
+Analysis Date: {{date}}
+
+Guidelines:
+- DO NOT REPEAT RULES
+- Each rule must be a SUFFICIENT condition for an outbreak in the next 12 months. A true rule guarantees the event.
+- Use only positive variables (X₁, X₂, etc.) with AND and OR operators.
+- Rules should use 1 to 3 distinct variables.
+- A single literal (e.g., X₁) may be used alone if it alone is a sufficient predictor of an outbreak in 12 months.
+- If using AND or OR, each must connect at least two literals.
+- Do not use AND(X₁) or OR(X₁)—use X₁ by itself instead.
+- Do not use empty OR or AND clauses. Every OR/AND must include 2 to 3 distinct literals.
+- All variables must refer to indicators or market signals projected within the next 12 months.
+
+Instructions:
+1. Review previously created rules and their variables.
+2. Analyze the available markets and pick 1–3 new variables predictive of a {{disease}} outbreak in the next 12 months.
+3. Write a new Boolean rule (never before used) that, if true, guarantees a massive {{disease}} outbreak within the next 12 months.
+4. Convert the rule to the required JSON structure.
+
+Output Format:
+Return each rule as one of the following JSON objects:
+
+Single literal:
+{
+    "rule": {
+        "type": "literal",
+        "name": "X1"
+    }
+}
+
+Compound AND:
+{
+    "rule": {
+        "type": "and",
+        "children": [
+            {"type": "literal", "name": "X1"},
+            {"type": "literal", "name": "X2"}
+        ]
+    }
+}
+
+Compound OR:
+{
+    "rule": {
+        "type": "or",
+        "children": [
+            {"type": "literal", "name": "X1"},
+            {"type": "literal", "name": "X2"}
+        ]
+    }
+}
+
+Nested (max depth 2):
+{
+  "rule": {
+    "type": "and",
+    "children": [
+      { "type": "literal", "name": "X1" },
+      {
+        "type": "or",
+        "children": [
+          { "type": "literal", "name": "X2" },
+          { "type": "literal", "name": "X3" }
+        ]
+      }
+    ]
+  }
+}
+
+Remember:
+- Maximum 3 unique variables total
+- Maximum nesting depth of 2
+- Each AND/OR must have 2–3 children
+- Use variable names exactly as provided in the dictionary
+- You’re rewarded for shape-creative rules
+
+You must avoid generating rules functionally equivalent to any in {{created_rules}}.  Check all prior rules for structural or variable-set duplication.
+
+Generate {{num_of_rules}} new rules now.
+
+Available Markets and Variables:

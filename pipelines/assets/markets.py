@@ -17,7 +17,8 @@ from sqlmodel import Session, select
 
 from ml.classification import H5N1Classifier, RuleEligibilityClassifier
 from ml.clients import get_client
-from ml.ranker import DiseaseInformation, avg_relevance_score, get_prompt
+from ml.ranker import DiseaseInformation, get_prompt, get_relevance
+from ml.rules import PromptInformation, RuleNode, get_rules, get_rules_prompt
 from models.markets import (
     Market,
     MarketBet,
@@ -26,6 +27,8 @@ from models.markets import (
     MarketLabelType,
     MarketRelevanceScore,
     MarketRelevanceScoreType,
+    MarketRule,
+    MarketRuleLink,
     MarketUpdate,
 )
 from pipelines.resources.db import locked_session
@@ -290,6 +293,50 @@ def get_text_rep(market: Market) -> str:
         text_rep = f"""<Title>{title}</Title>
         <Description>{description}</Description>"""
     return text_rep
+
+def stringify_node(node: RuleNode, session: Session):
+    """Gets a string representation of the given rule."""
+    if node.type == 'literal':
+
+        market = session.exec(
+            select(Market).where(Market.id == node.name.strip('"').strip("'"))
+        ).first()
+
+        return market.question if market else f"[Unknown: {node.name}]"
+
+    elif node.type in ['and', 'or', 'not']:
+        children = [stringify_node(child, session) for child in node.children]
+        joined = f" {node.type.upper()} ".join(f"({child})" for child in children)
+        return joined
+
+    else:
+        return "[Unknown node type]"
+
+
+def extract_literals_from_rule(rule: RuleNode) -> list[str]:
+    """
+    Extract all literal names from a logical rule, stripping surrounding quotes.
+
+    Args:
+        rule: A LogicalRule instance containing the rule tree
+
+    Returns:
+        List of cleaned literal names found in the rule
+
+    """
+    literals = []
+
+    def traverse(node: RuleNode):
+        if node.type == "literal":
+            # Strip leading/trailing quotes (single or double)
+            cleaned_name = node.name.strip('"').strip("'")
+            literals.append(cleaned_name)
+        elif node.type in ("and", "or"):
+            for child in node.children:
+                traverse(child)
+
+    traverse(rule.rule if hasattr(rule, "rule") else rule)
+    return literals
 
 
 @dg.asset(
@@ -680,7 +727,14 @@ def relevance_temporal(context: dg.AssetExecutionContext) -> dg.MaterializeResul
     """
     # get list of market ids that have been labeled
     with Session(context.resources.database_engine) as session:
-        market_ids = session.exec(select(MarketLabel.market_id)).all()
+        h5n1_result = session.exec(
+            select(MarketLabelType).where(MarketLabelType.label_name == "h5n1")
+        ).first()
+        market_ids = session.exec(
+            select(MarketLabel.market_id).where(
+                MarketLabel.label_type_id == h5n1_result.id
+            )
+        ).all()
         label_for_temp = session.exec(
             select(MarketRelevanceScoreType.id).where(
                 MarketRelevanceScoreType.score_name == "temporal_relevance"
@@ -714,20 +768,21 @@ def relevance_temporal(context: dg.AssetExecutionContext) -> dg.MaterializeResul
         )
         prompt_temp = get_prompt("temporal_relevance_prompt.j2", disease_info)
         client = get_client()
-        score_value = avg_relevance_score(prompt_temp, market.text_rep, client)
-
+        reasonings, scores, average_score = get_relevance(prompt_temp, market.text_rep, client)
         # Collect for batch write
         scores_to_add.append(MarketRelevanceScore(
             market_id=market_id,
             score_type_id=label_for_temp,
-            score_value=score_value,
+            score_value=average_score,
+            chain_of_thoughts=str(reasonings),
+            scores=str(scores),
         ))
         market_ids_to_delete.append(market_id)
         context.log.info(f"Temporal relevance computed for market: {market_id}.")
 
     with locked_session(context.resources.database_engine) as session:
         for m in market_ids_to_delete:
-            row = session.get(MarketUpdate, m.id)
+            row = session.get(MarketUpdate, m)
             row.temp_relevance_scored_at = datetime.now(UTC)
 
         session.exec(
@@ -759,7 +814,14 @@ def relevance_geographical(context: dg.AssetExecutionContext) -> dg.MaterializeR
     """
     # get list of market ids that have been labeled
     with Session(context.resources.database_engine) as session:
-        market_ids = session.exec(select(MarketLabel.market_id)).all()
+        h5n1_result = session.exec(
+            select(MarketLabelType).where(MarketLabelType.label_name == "h5n1")
+        ).first()
+        market_ids = session.exec(
+            select(MarketLabel.market_id).where(
+                MarketLabel.label_type_id == h5n1_result.id
+            )
+        ).all()
         label_for_geo = session.exec(
             select(MarketRelevanceScoreType.id).where(
                 MarketRelevanceScoreType.score_name == "geographical_relevance"
@@ -793,20 +855,22 @@ def relevance_geographical(context: dg.AssetExecutionContext) -> dg.MaterializeR
         )
         prompt_temp = get_prompt("geographic_relevance_prompt.j2", disease_info)
         client = get_client()
-        score_value = avg_relevance_score(prompt_temp, market.text_rep, client)
+        reasonings, scores, average_score = get_relevance(prompt_temp, market.text_rep, client)
 
         # Collect for batch write
         scores_to_add.append(MarketRelevanceScore(
             market_id=market_id,
             score_type_id=label_for_geo,
-            score_value=score_value,
+            score_value=average_score,
+            chain_of_thoughts=str(reasonings),
+            scores=str(scores),
         ))
         market_ids_to_delete.append(market_id)
         context.log.info(f"Geographical relevance computed for market: {market_id}.")
 
     with locked_session(context.resources.database_engine) as session:
         for m in market_ids_to_delete:
-            row = session.get(MarketUpdate, m.id)
+            row = session.get(MarketUpdate, m)
             row.geo_relevance_scored_at = datetime.now(UTC)
 
         session.exec(
@@ -838,7 +902,14 @@ def relevance_index_question(context: dg.AssetExecutionContext) -> dg.Materializ
     """
     # get list of market ids that have been labeled
     with Session(context.resources.database_engine) as session:
-        market_ids = session.exec(select(MarketLabel.market_id)).all()
+        h5n1_result = session.exec(
+            select(MarketLabelType).where(MarketLabelType.label_name == "h5n1")
+        ).first()
+        market_ids = session.exec(
+            select(MarketLabel.market_id).where(
+                MarketLabel.label_type_id == h5n1_result.id
+            )
+        ).all()
         label_for_index = session.exec(
             select(MarketRelevanceScoreType.id).where(
                 MarketRelevanceScoreType.score_name == "index_question_relevance"
@@ -872,20 +943,22 @@ def relevance_index_question(context: dg.AssetExecutionContext) -> dg.Materializ
         )
         prompt_temp = get_prompt("index_question_relevance_prompt.j2", disease_info)
         client = get_client()
-        score_value = avg_relevance_score(prompt_temp, market.text_rep, client)
-
+        reasonings, scores, average_score = get_relevance(prompt_temp, market.text_rep, client)
         # Collect for batch write
         scores_to_add.append(MarketRelevanceScore(
             market_id=market_id,
             score_type_id=label_for_index,
-            score_value=score_value,
+            score_value=average_score,
+            chain_of_thoughts=str(reasonings),
+            scores=str(scores),
         ))
         market_ids_to_delete.append(market_id)
         context.log.info(f"Index question relevance computed for market: {market_id}.")
 
+
     with locked_session(context.resources.database_engine) as session:
         for m in market_ids_to_delete:
-            row = session.get(MarketUpdate, m.id)
+            row = session.get(MarketUpdate, m)
             row.index_question_relevance_scored_at = datetime.now(UTC)
 
         session.exec(
@@ -1056,6 +1129,95 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
             "num_markets_processed": dg.MetadataValue.int(num_markets_processed),
             "num_markets_eligible": dg.MetadataValue.int(num_markets_eligible),
             "num_markets_skipped": dg.MetadataValue.int(num_skipped),
+        }
+    )
+
+
+@dg.asset(
+    deps=[market_rule_eligibility_labels],
+    required_resource_keys={"database_engine"},
+    description="Rules from eligible markets."
+)
+def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
+    """
+    Asset to generate and store logical market rules using LLM.
+    """
+    # Load markets that are eligible
+    with Session(context.resources.database_engine) as session:
+        rule_eligible_result = session.exec(
+            select(MarketLabelType).where(MarketLabelType.label_name == "rule_eligible")
+        ).first()
+        if not rule_eligible_result:
+            context.log.warning("No rule_eligible label type found.")
+            return dg.MaterializeResult(metadata={})
+
+        rule_eligible_label_type_id = rule_eligible_result.id
+
+        markets_to_process = session.exec(
+            select(Market)
+            .join(MarketLabel, Market.id == MarketLabel.market_id)
+            .where(MarketLabel.label_type_id == rule_eligible_label_type_id)
+        ).all()
+
+        if not markets_to_process:
+            context.log.warning("No eligible markets found.")
+            return dg.MaterializeResult(metadata={})
+
+        # Build dict of market_id -> text_rep
+        market_dict = {market.id: market.text_rep for market in markets_to_process}
+
+        # Prepare prompt
+        prompt_data = PromptInformation(
+            disease="ExampleDisease",
+            date=datetime.now(UTC),
+            overall_index_question="What market factors increase disease risk?",
+            num_of_rules=10
+        )
+        prompt = get_rules_prompt("rule_gen_prompt.j2", prompt_data)
+
+        # Generate rules using LLM
+        client = get_client()
+        logical_rules = get_rules(prompt, str(market_dict), client)
+
+        used_markets = []
+
+        for rule_obj in logical_rules:
+            rule_json = rule_obj.rule.model_dump_json()
+            readable = stringify_node(rule_obj.rule, session)
+
+            new_rule = MarketRule(
+                rule=rule_json,
+                readable_rule=readable,
+                created_at=datetime.now(UTC),
+                chain_of_thoughts = rule_obj.reasoning,
+            )
+            session.add(new_rule)
+            session.flush()  # Ensures new_rule.id is available
+
+            for market_name in extract_literals_from_rule(rule_obj.rule):
+                if market_name not in used_markets:
+                    used_markets.append(market_name)
+
+                market_obj = session.exec(
+                    select(Market).where(Market.text_rep == market_name)
+                ).first()
+
+                if market_obj:
+                    new_link = MarketRuleLink(
+                        market_id=market_obj.id,
+                        rule_id=new_rule.id,
+                    )
+                    session.add(new_link)
+                else:
+                    context.log.warning(f"Market not found for literal: {market_name}")
+
+        session.commit()
+
+    context.log.info(f"Generated and stored {len(logical_rules)} market rules.")
+    return dg.MaterializeResult(
+        metadata={
+            "num_rules": dg.MetadataValue.int(len(logical_rules)),
+            "num_markets_used": dg.MetadataValue.int(len(used_markets)),
         }
     )
 

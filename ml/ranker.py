@@ -37,7 +37,7 @@ def get_prompt(prompt_template_file: str, disease_data: DiseaseInformation) -> s
         disease_data: disease_information about the event.
 
     Returns:
-        A MarketRelevance object containing reasoning and score.
+        A rendered prompt.
 
     """
     base_dir = path.dirname(path.abspath(__file__))
@@ -52,8 +52,8 @@ def get_prompt(prompt_template_file: str, disease_data: DiseaseInformation) -> s
                            overall_index_question = disease_data.overall_index_question)
 
 
-def avg_relevance_score(prompt: str, market_text_representation: str,
-                    client: instructor.Instructor) -> float:
+def get_relevance(prompt: str, market_text_representation: str,
+                    client: instructor.Instructor) -> tuple[list, list, float]:
     """
     Rank the relevance of a market description to a given prompt.
 
@@ -66,6 +66,7 @@ def avg_relevance_score(prompt: str, market_text_representation: str,
         A float average score for ten responses.
 
     """
+    reasonings = []
     scores = []
     for _ in range(10):
         response = client.chat.completions.create(
@@ -79,8 +80,9 @@ def avg_relevance_score(prompt: str, market_text_representation: str,
             temperature=0.3
         )
         scores.append(response.relevance_score)
+        reasonings.append(response.reasoning)
     # Calculate average score
     average_score = sum(scores) / len(scores)
-    return average_score
+    return reasonings, scores, average_score
 
 

@@ -10,6 +10,18 @@ from datetime import UTC, datetime
 from sqlmodel import Field, Relationship, SQLModel
 
 
+class MarketRuleLink(SQLModel, table=True):
+    """Table linking markets and rules."""
+
+    __tablename__ = "market_rule_links"
+
+    market_id: str = Field(foreign_key="markets.id", primary_key=True)
+    rule_id: int = Field(foreign_key="market_rules.id", primary_key=True)
+
+    market: "Market" = Relationship()
+    rule: "MarketRule" = Relationship()
+
+
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # API data
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -60,7 +72,10 @@ class Market(SQLModel, table=True):
     updates: list["MarketUpdate"] = Relationship(back_populates="market")
     scores: list["MarketRelevanceScore"] = Relationship(back_populates="market")
     bets: list["MarketBet"] = Relationship(back_populates="market")
-
+    rules: list["MarketRule"] = Relationship(
+        back_populates="markets",
+        link_model=MarketRuleLink
+    )
 
 class MarketComment(SQLModel, table=True):
     """Prediction market comment model."""
@@ -190,6 +205,8 @@ class MarketRelevanceScore(SQLModel, table=True):
     market_id: str = Field(primary_key=True, foreign_key="markets.id")
     score_type_id: int = Field(primary_key=True, foreign_key="market_relevance_score_types.id")
     score_value: float
+    scores: str | None = None
+    chain_of_thoughts: str | None = None
 
     # Relationships
     market: "Market" = Relationship(back_populates="scores")
@@ -215,3 +232,24 @@ class MarketUpdate(SQLModel, table=True):
     # Relationships
     market: "Market" = Relationship(back_populates="updates")
 
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Market rules
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+class MarketRule(SQLModel, table=True):
+    """Rule generated using eligible markets."""
+
+    __tablename__ = "market_rules"
+
+    id: int = Field(primary_key=True)
+    rule: str  # JSON string representing logical conditions
+    readable_rule: str  # human-readable description
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    strength_weight: float | None = None
+    relevance_weight: float | None = None
+    chain_of_thoughts: str
+
+    # Relationship
+    markets: list["Market"] = Relationship(
+        back_populates="rules",
+        link_model=MarketRuleLink
+    )
