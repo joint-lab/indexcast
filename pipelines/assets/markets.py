@@ -1187,6 +1187,8 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
             overall_index_question="Will there be a massive H5N1 outbreak in the next 12 months?",
             num_of_rules=30
         )
+        
+        context.log.info(f"Generating rules for {len(market_data)} eligible markets")
         prompt = get_rules_prompt(
             "rule_gen_prompt.j2", 
             prompt_data, 
@@ -1194,10 +1196,23 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
             existing_rules
         )
 
-        # Generate rules using LLM with validation
+        # Generate rules using LLM with validation and chunking
         client = get_client()
         valid_market_ids = set(market_data.keys())
-        logical_rules = get_rules(prompt, valid_market_ids, client)
+        
+        try:
+            logical_rules = get_rules(prompt, valid_market_ids, client)
+            context.log.info(f"Successfully generated {len(logical_rules)} rules")
+        except Exception as e:
+            context.log.error(f"Rule generation failed: {e}")
+            # Return empty result rather than crashing the entire pipeline
+            return dg.MaterializeResult(
+                metadata={
+                    "num_rules": dg.MetadataValue.int(0),
+                    "num_markets_used": dg.MetadataValue.int(0),
+                    "error": dg.MetadataValue.text(str(e))
+                }
+            )
 
         used_markets = []
 
@@ -1212,13 +1227,15 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
                 chain_of_thoughts = rule_obj.reasoning,
             )
             session.add(new_rule)
+            session.flush()  # Ensures new_rule.id is available
 
-            for market_name in extract_literals_from_rule(rule_obj.rule):
-                if market_name not in used_markets:
-                    used_markets.append(market_name)
+            for market_id in extract_literals_from_rule(rule_obj.rule):
+                if market_id not in used_markets:
+                    used_markets.append(market_id)
 
+                # The rule contains actual market IDs, not text representations
                 market_obj = session.exec(
-                    select(Market).where(Market.text_rep == market_name)
+                    select(Market).where(Market.id == market_id)
                 ).first()
 
                 if market_obj:
@@ -1228,7 +1245,7 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
                     )
                     session.add(new_link)
                 else:
-                    context.log.warning(f"Market not found for literal: {market_name}")
+                    context.log.warning(f"Market not found for ID: {market_id}")
 
         session.commit()
 

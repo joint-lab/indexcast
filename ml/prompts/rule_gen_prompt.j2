@@ -115,7 +115,15 @@ Use ONLY these market IDs as variable names in your rules:
 
 ## RESPONSE FORMAT:
 
-Return ONLY a valid JSON array with {{num_of_rules}} rule objects. No additional text or explanation outside the JSON.
+CRITICAL JSON FORMATTING REQUIREMENTS:
+- Return ONLY a valid JSON array with {{num_of_rules}} rule objects
+- NO text before or after the JSON array
+- Use double quotes for ALL keys and values
+- NO trailing commas
+- NO single quotes
+- NO comments in JSON
+- Ensure all braces and brackets are properly closed
+- Each rule object must have exactly "reasoning" and "rule" fields
 
 Example response structure:
 ```json
