@@ -295,7 +295,7 @@ def get_text_rep(market: Market) -> str:
     return text_rep
 
 def stringify_node(node: RuleNode, session: Session):
-    """Gets a string representation of the given rule."""
+    """Get a string representation of the given rule."""
     if node.type == 'literal':
 
         market = session.exec(
@@ -1144,9 +1144,7 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
     description="Rules from eligible markets."
 )
 def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
-    """
-    Asset to generate and store logical market rules using LLM.
-    """
+    """Asset to generate and store logical market rules using LLM."""
     # Load markets that are eligible
     with Session(context.resources.database_engine) as session:
         rule_eligible_result = session.exec(

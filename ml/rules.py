@@ -1,4 +1,5 @@
-"""Rule generator for index.
+"""
+Rule generator for index.
 
 Authors:
 - JGY <jyoung22@uvm.edu>
@@ -34,7 +35,8 @@ class PromptInformation(BaseModel):
 
 
 def _calculate_node_depth(node: "RuleNode", level: int = 1) -> int:
-    """Calculate the maximum depth of a rule node tree.
+    """
+    Calculate the maximum depth of a rule node tree.
     
     Args:
         node: The rule node to analyze
@@ -42,6 +44,7 @@ def _calculate_node_depth(node: "RuleNode", level: int = 1) -> int:
         
     Returns:
         Maximum depth of the node tree
+
     """
     if isinstance(node, LiteralNode):
         return level
@@ -57,7 +60,8 @@ def _calculate_node_depth(node: "RuleNode", level: int = 1) -> int:
 
 
 def _validate_compound_node(node: "AndNode | OrNode", node_type: str) -> "AndNode | OrNode":
-    """Validate compound nodes (AND/OR) for depth and literal constraints.
+    """
+    Validate compound nodes (AND/OR) for depth and literal constraints.
     
     Args:
         node: The compound node to validate
@@ -68,6 +72,7 @@ def _validate_compound_node(node: "AndNode | OrNode", node_type: str) -> "AndNod
         
     Raises:
         ValueError: If validation fails
+
     """
     max_depth = max(_calculate_node_depth(child) for child in node.children)
     if max_depth > MAX_RULE_DEPTH:
@@ -99,7 +104,8 @@ class AndNode(BaseModel):
     """An AND node combining multiple rule nodes."""
     
     type: Literal["and"]
-    children: list["RuleNode"] = Field(..., min_items=MIN_CHILDREN_PER_NODE, max_items=MAX_CHILDREN_PER_NODE)
+    children: list["RuleNode"] = Field(..., min_items=MIN_CHILDREN_PER_NODE,
+                                       max_items=MAX_CHILDREN_PER_NODE)
 
     def flatten(self) -> list["LiteralNode"]:
         """Return all literal nodes from all children."""
@@ -115,7 +121,8 @@ class OrNode(BaseModel):
     """An OR node combining multiple rule nodes."""
     
     type: Literal["or"]
-    children: list["RuleNode"] = Field(..., min_items=MIN_CHILDREN_PER_NODE, max_items=MAX_CHILDREN_PER_NODE)
+    children: list["RuleNode"] = Field(..., min_items=MIN_CHILDREN_PER_NODE,
+                                       max_items=MAX_CHILDREN_PER_NODE)
 
     def flatten(self) -> list["LiteralNode"]:
         """Return all literal nodes from all children."""
@@ -173,7 +180,8 @@ def get_rules_prompt(
     markets: dict,
     existing_rules: list[str] = None
 ) -> str:
-    """Use a template file to generate a prompt.
+    """
+    Use a template file to generate a prompt.
 
     Args:
         prompt_template_file: template file to use.
@@ -183,6 +191,7 @@ def get_rules_prompt(
 
     Returns:
         A rendered prompt.
+
     """
     base_dir = path.dirname(path.abspath(__file__))
     templates_dir = path.join(base_dir, "prompts")
@@ -202,7 +211,8 @@ def get_rules_prompt(
 
 
 def validate_rule_structure(rule_data: dict, valid_market_ids: set[str]) -> tuple[bool, str]:
-    """Validate rule structure before Pydantic parsing.
+    """
+    Validate rule structure before Pydantic parsing.
     
     Args:
         rule_data: Raw rule dictionary from LLM
@@ -210,6 +220,7 @@ def validate_rule_structure(rule_data: dict, valid_market_ids: set[str]) -> tupl
         
     Returns:
         Tuple of (is_valid, error_message)
+
     """
     try:
         if "rule" not in rule_data:
@@ -234,18 +245,21 @@ def validate_rule_structure(rule_data: dict, valid_market_ids: set[str]) -> tupl
             if not isinstance(children, list):
                 return False, f"Children must be a list in {rule_type}"
             if len(children) < MIN_CHILDREN_PER_NODE or len(children) > MAX_CHILDREN_PER_NODE:
-                return False, f"{rule_type} must have {MIN_CHILDREN_PER_NODE}-{MAX_CHILDREN_PER_NODE} children"
+                return False, (f"{rule_type} must have "
+                               f"{MIN_CHILDREN_PER_NODE}-{MAX_CHILDREN_PER_NODE} children")
                 
             # Recursively validate children
             for child in children:
-                child_valid, child_error = validate_rule_structure({"rule": child}, valid_market_ids)
+                child_valid, child_error = validate_rule_structure({"rule": child},
+                                                                   valid_market_ids)
                 if not child_valid:
                     return False, f"Invalid child in {rule_type}: {child_error}"
                     
         elif rule_type == "not":
             if "child" not in rule:
                 return False, "Missing 'child' field in not"
-            child_valid, child_error = validate_rule_structure({"rule": rule["child"]}, valid_market_ids)
+            child_valid, child_error = validate_rule_structure({"rule": rule["child"]},
+                                                               valid_market_ids)
             if not child_valid:
                 return False, f"Invalid child in not: {child_error}"
         else:
@@ -265,7 +279,8 @@ def get_rules(
     temperature: float = DEFAULT_TEMPERATURE,
     max_retries: int = DEFAULT_MAX_RETRIES
 ) -> list[LogicalRule]:
-    """Get rules using eligible markets with improved validation.
+    """
+    Get rules using eligible markets with improved validation.
 
     Args:
         prompt: The system-level instruction or prompt for ranking.
@@ -280,6 +295,7 @@ def get_rules(
         
     Raises:
         Exception: If rule generation fails after all retries.
+
     """
     for attempt in range(max_retries + 1):
         try:
@@ -303,8 +319,7 @@ def get_rules(
                 is_valid, error = validate_rule_structure(rule_dict, valid_market_ids)
                 if is_valid:
                     validated_rules.append(rule)
-                else:
-                    print(f"Warning: Skipping invalid rule - {error}")
+
                     
             if validated_rules:
                 return validated_rules
@@ -313,8 +328,8 @@ def get_rules(
                 
         except Exception as e:
             if attempt == max_retries:
-                raise Exception(f"Failed to generate rules after {max_retries + 1} attempts: {e}") from e
-            print(f"Attempt {attempt + 1} failed: {e}. Retrying...")
+                raise Exception(f"Failed to generate rules after "
+                                f"{max_retries + 1} attempts: {e}") from e
             # Increase temperature slightly for retry
             temperature = min(1.0, temperature + 0.1)
             
