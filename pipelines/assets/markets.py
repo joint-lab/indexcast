@@ -304,10 +304,13 @@ def stringify_node(node: RuleNode, session: Session):
 
         return market.question if market else f"[Unknown: {node.name}]"
 
-    elif node.type in ['and', 'or', 'not']:
+    elif node.type in ['and', 'or']:
         children = [stringify_node(child, session) for child in node.children]
         joined = f" {node.type.upper()} ".join(f"({child})" for child in children)
         return joined
+    elif node.type == 'not':
+        child_str = stringify_node(node.child, session)
+        return f"NOT ({child_str})"
 
     else:
         return "[Unknown node type]"
@@ -334,6 +337,8 @@ def extract_literals_from_rule(rule: RuleNode) -> list[str]:
         elif node.type in ("and", "or"):
             for child in node.children:
                 traverse(child)
+        elif node.type == "not":
+            traverse(node.child)
 
     traverse(rule.rule if hasattr(rule, "rule") else rule)
     return literals
@@ -1163,21 +1168,38 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
             context.log.warning("No eligible markets found.")
             return dg.MaterializeResult(metadata={})
 
-        # Build dict of market_id -> text_rep
-        market_dict = {market.id: market.text_rep for market in markets_to_process}
-
-        # Prepare prompt
+        # Build structured market data for prompt
+        market_data = {}
+        for market in markets_to_process:
+            market_data[market.id] = {
+                "question": market.question,
+                "description": market.description or "",
+                "text_rep": market.text_rep
+            }
+            
+        # Get existing rules to avoid duplicates
+        existing_rules = session.exec(
+            select(MarketRule.readable_rule)
+        ).all()
+        
+        # Prepare prompt with proper context
         prompt_data = PromptInformation(
-            disease="ExampleDisease",
+            disease="H5N1",
             date=datetime.now(UTC),
-            overall_index_question="What market factors increase disease risk?",
-            num_of_rules=10
+            overall_index_question="Will there be a massive H5N1 outbreak in the next 12 months?",
+            num_of_rules=30
         )
-        prompt = get_rules_prompt("rule_gen_prompt.j2", prompt_data)
+        prompt = get_rules_prompt(
+            "rule_gen_prompt.j2", 
+            prompt_data, 
+            market_data,
+            existing_rules
+        )
 
-        # Generate rules using LLM
+        # Generate rules using LLM with validation
         client = get_client()
-        logical_rules = get_rules(prompt, str(market_dict), client)
+        valid_market_ids = set(market_data.keys())
+        logical_rules = get_rules(prompt, valid_market_ids, client)
 
         used_markets = []
 
@@ -1192,7 +1214,6 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
                 chain_of_thoughts = rule_obj.reasoning,
             )
             session.add(new_rule)
-            session.flush()  # Ensures new_rule.id is available
 
             for market_name in extract_literals_from_rule(rule_obj.rule):
                 if market_name not in used_markets:
