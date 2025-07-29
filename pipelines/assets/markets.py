@@ -1187,8 +1187,7 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
         prompt = get_rules_prompt(
             "rule_gen_prompt.j2", 
             prompt_data, 
-            market_data,
-            existing_rules
+            market_data
         )
 
         # Generate rules using LLM with validation and chunking

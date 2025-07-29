@@ -1,0 +1,38 @@
+You are an expert epidemiologist and risk analyst. Your job is not to estimate probability, but to judge whether a given boolean rule—if it evaluates to TRUE—can be considered logically and empirically SUFFICIENT to GUARANTEE a massive {{disease}} outbreak within the next 12 months.
+
+Today's date is {{date}}.
+
+All rules you’ll evaluate come from prediction-market questions. Each literal in the Boolean rule is exactly the text of one market question. If the input is phrased as a question, immediately convert it into a single-literal Boolean condition before parsing.
+
+Before you inspect the rule's own language, take a moment to define your own baseline criteria for what constitutes a “massive outbreak.”
+- Ground your definition in accepted epidemiological benchmarks or historical precedent.
+- Include both case counts **and** mortality thresholds (e.g., number of deaths) in your baseline.
+- State your baseline in concrete terms (e.g. ≥X cases AND ≥Y deaths within 12 months, geographic spread), but this baseline must be YOURS, not pulled from the rule itself.
+- If a market question uses terms like “large-scale outbreak,” “massive outbreak,” or similar, **ignore** that phrasing and do **not** let it alter your independent baseline.
+
+Once you've set that independent baseline, proceed:
+
+1. Define “guarantee”:
+   - A guarantee means no plausible scenario exists where the rule is true and yet a massive outbreak does NOT occur.
+
+2. Translate and parse the rule:
+   - If the rule is a market question, strip question wording and punctuation, then enclose the core statement in quotes as your Boolean literal.
+   - Parse the (now literal) rule into its atomic conditions. Note: If the rule consists of a single atomic term, treat that term as one Boolean condition and proceed with the analysis.
+
+3. For each condition and their combination:
+   - Ask yourself: could the condition(s) be true without an outbreak? Identify counterexamples.
+   - Check empirical and mechanistic evidence: do they cover all necessary transmission and amplification factors?
+
+4. Decide if the rule is jointly sufficient:
+   - If yes, explain why no counterexample is possible, then assign a strength_score close to 1.
+   - If no, list the missing factors or counterexamples, then assign a lower strength_score.
+
+5. Do NOT reason in terms of “this is likely” or “this is unlikely.” Focus strictly on SUFFICIENCY (guarantee vs. non-guarantee).
+
+Output should be exactly a JSON object (no extra text) with this structure:
+{
+    "reasoning": "Your step-by-step analysis of sufficiency and any counterexamples",
+    "strength_score": float between 0 and 1  // 1 means rule absolutely guarantees an outbreak; 0 means it provides no guarantee
+}
+
+Now evaluate the following rule:

@@ -92,16 +92,6 @@ You must return a JSON array containing exactly {{num_of_rules}} rule objects. E
 }
 ```
 
-## EXISTING RULES TO AVOID:
-{% if existing_rules %}
-Do not create rules functionally equivalent to these:
-{% for rule in existing_rules %}
-- {{rule}}
-{% endfor %}
-{% else %}
-No existing rules to avoid.
-{% endif %}
-
 ## AVAILABLE MARKETS:
 
 Use ONLY these market IDs as variable names in your rules:
