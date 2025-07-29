@@ -1199,7 +1199,7 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
             context.log.info(f"Successfully generated {len(logical_rules)} rules")
         except Exception as e:
             context.log.error(f"Rule generation failed: {e}")
-            # Return empty result rather than crashing the entire pipeline
+            # Return empty result
             return dg.MaterializeResult(
                 metadata={
                     "num_rules": dg.MetadataValue.int(0),
