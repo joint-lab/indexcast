@@ -247,6 +247,12 @@ class MarketRule(SQLModel, table=True):
     strength_weight: float | None = None
     relevance_weight: float | None = None
     chain_of_thoughts: str
+    # the scores that were averaged to get the two weights
+    strength_scores: str | None = None
+    relevance_scores: str | None = None
+    # chain of thoughts for the weights
+    strength_chain: str | None = None
+    relevance_chain: str | None = None
 
     # Relationship
     markets: list["Market"] = Relationship(

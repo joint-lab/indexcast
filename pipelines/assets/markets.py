@@ -18,7 +18,7 @@ from sqlmodel import Session, select
 from ml.classification import H5N1Classifier, RuleEligibilityClassifier
 from ml.clients import get_client
 from ml.ranker import DiseaseInformation, get_prompt, get_relevance
-from ml.rules import PromptInformation, RuleNode, get_rules, get_rules_prompt
+from ml.rules import PromptInformation, RuleNode, get_rules, get_rules_prompt, get_weight
 from models.markets import (
     Market,
     MarketBet,
@@ -1174,11 +1174,6 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
                 "description": market.description or "",
                 "text_rep": market.text_rep
             }
-            
-        # Get existing rules to avoid duplicates
-        existing_rules = session.exec(
-            select(MarketRule.readable_rule)
-        ).all()
         
         # Prepare prompt with proper context
         prompt_data = PromptInformation(
@@ -1220,16 +1215,73 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
             rule_json = rule_obj.rule.model_dump_json()
             readable = stringify_node(rule_obj.rule, session)
 
+            # Get disease information for prompts
+            disease_info = DiseaseInformation(
+                disease="H5N1",
+                date=datetime.now(UTC),
+                overall_index_question=
+                "Will there be a massive H5N1 outbreak in the next 12 months?"
+            )
+
+            # Get strength score using rule strength prompt
+            strength_prompt = get_prompt("rule_strength_score_prompt.j2", disease_info)
+            client = get_client()
+            strength_reasonings, strength_scores, strength_avg = get_weight(
+                strength_prompt, readable, client
+            )
+
+            # Get relevance score - need to collect market metrics for this rule
+            rule_market_ids = extract_literals_from_rule(rule_obj.rule)
+            
+            # Collect all 8 metrics for markets in this rule
+            market_metrics = {}
+            for market_id in rule_market_ids:
+                # Get all relevance scores for this market
+                market_scores = session.exec(
+                    select(MarketRelevanceScore)
+                    .where(MarketRelevanceScore.market_id == market_id)
+                ).all()
+                
+                # Organize scores by type
+                scores_dict = {}
+                for score in market_scores:
+                    score_type_name = score.score_type.score_name
+                    scores_dict[score_type_name] = score.score_value
+                
+                market_metrics[market_id] = scores_dict
+
+            # Format market metrics for the relevance prompt
+            metrics_text = f"Rule: {readable}\n\nMarket Metrics:\n"
+            for market_id, metrics in market_metrics.items():
+                market_obj = session.exec(select(Market).where(Market.id == market_id)).first()
+                market_question = market_obj.question if market_obj else "Unknown market"
+                metrics_text += f"\nMarket ID: {market_id}\nQuestion: {market_question}\n"
+                for metric_name, value in metrics.items():
+                    metrics_text += f"  {metric_name}: {value}\n"
+
+            # Get relevance score using rule relevance prompt
+            relevance_prompt = get_prompt("rule_relevance_score_prompt.j2", disease_info)
+            relevance_reasonings, relevance_scores, relevance_avg = get_relevance(
+                relevance_prompt, metrics_text, client
+            )
+
             new_rule = MarketRule(
                 rule=rule_json,
                 readable_rule=readable,
                 created_at=datetime.now(UTC),
-                chain_of_thoughts = rule_obj.reasoning,
+                chain_of_thoughts=rule_obj.reasoning,
+                strength_weight=strength_avg,
+                relevance_weight=relevance_avg,
+                strength_chain=str(strength_reasonings),
+                relevance_chain=str(relevance_reasonings),
+                strength_scores=str(strength_scores),
+                relevance_scores=str(relevance_scores),
             )
             session.add(new_rule)
             session.flush()  # Ensures new_rule.id is available
+            context.log.info(f"Successfully scored new rule: {new_rule}")
 
-            for market_id in extract_literals_from_rule(rule_obj.rule):
+            for market_id in rule_market_ids:
                 if market_id not in used_markets:
                     used_markets.append(market_id)
 

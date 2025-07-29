@@ -14,7 +14,7 @@ from typing import Annotated, Literal
 
 import instructor
 from jinja2 import Environment, FileSystemLoader
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # Constants for rule validation
 MAX_RULE_DEPTH = 2
@@ -500,3 +500,77 @@ def get_rules(
             prompt, valid_market_ids, client, total_rules,
             model, temperature, max_retries
         )
+
+#######################################################
+# Weights for the rules
+#######################################################
+
+
+class WeightScore(BaseModel):
+    """
+    Represent the evaluation of a rule's predictive power for forecasting outbreaks.
+
+    Attributes:
+        reasoning (str): A text explanation providing context or justification for the given score.
+        weight_score (float): A score between 0 and 1
+
+    """
+
+    reasoning: str = Field(description="The reasoning behind the score")
+    weight_score: float = Field(description="The strength score of the rule in "
+                                            "predicting an outbreak in the next 12 "
+                                            "months on the scale of 0 to 1")
+
+    @field_validator("weight_score", mode="after")
+    @classmethod
+    def validate_strength_score(cls, weight_score: float) -> float:
+        """
+        Validate that the strength score falls within the acceptable range of 0 to 1.
+
+        Args:
+            weight_score (float): The score to validate.
+
+        Returns:
+            float: The validated score if within range.
+
+        Raises:
+            ValueError: If the score is less than 0 or greater than 1.
+
+        """
+        if weight_score < 0 or weight_score > 1:
+            raise ValueError("Strength score must be between 0 and 1")
+        return weight_score
+
+def get_weight(prompt: str, market_text_representation: str,
+                    client: instructor.Instructor) -> tuple[list, list, float]:
+    """
+    Weight of a rule using a given prompt and a rule representation.
+
+    Args:
+        prompt: The system-level instruction or prompt for ranking.
+        market_text_representation: A text representation of the market.
+        client: An Instructor-enhanced OpenAI client.
+
+    Returns:
+        A float average score for ten responses.
+
+    """
+    scores = []
+    reasonings = []
+    for _ in range(5):
+        response = client.chat.completions.create(
+            model="gpt-4.1",
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": market_text_representation}
+            ],
+            response_model=WeightScore,
+            max_retries=3,
+            temperature=0.3
+        )
+        scores.append(response.weight_score)
+        reasonings.append(response.reasoning)
+
+    # Calculate average score
+    average_score = sum(scores) / len(scores)
+    return reasonings, scores, average_score

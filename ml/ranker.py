@@ -64,6 +64,8 @@ def get_relevance(prompt: str, market_text_representation: str,
 
     Returns:
         A float average score for ten responses.
+        The list of reasonings
+        the list of scores
 
     """
     reasonings = []
