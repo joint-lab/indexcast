@@ -680,11 +680,11 @@ def relevance_summary_statistics(context: dg.AssetExecutionContext) -> dg.Materi
 
             # num_traders
             num_traders = session.exec(select(func.count(func.distinct(MarketBet.user_id)))
-                .where(MarketBet.contract_id == market_id)).one_or_none() | 0
+                .where(MarketBet.contract_id == market_id)).one_or_none() or 0
 
             # num_comments
             num_comments = session.exec(select(func.count())
-                .where(MarketComment.market_id == market_id)).one_or_none() | 0
+                .where(MarketComment.market_id == market_id)).one_or_none() or 0
 
             to_insert = []
             for name, val in [
