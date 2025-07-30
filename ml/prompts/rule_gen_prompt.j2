@@ -1,6 +1,6 @@
 You are an expert at creating Boolean logic rules for disease outbreak prediction using prediction market data.
 
-Your task: Generate {{num_of_rules}} NEW Boolean rules that serve as SUFFICIENT conditions for a massive {{disease}} outbreak within the next 12 months.
+Your task: Generate {{num_of_rules}} Boolean rules that serve as SUFFICIENT conditions for a massive {{disease}} outbreak within the next 12 months.
 
 Target Event: Massive {{disease}} outbreak within the next 12 months
 Target Question: {{overall_index_question}}
@@ -22,75 +22,7 @@ are sufficient to guarantee such an outbreak.
    - AND/OR nodes must have exactly 2-3 children
    - Single literals are allowed
 4. **Uniqueness**: Avoid rules functionally equivalent to existing ones
-5. **JSON Format**: Follow the exact structure shown below
-6. **Logical Guarantee**: Each rule must define a condition such that if it is true, then a massive outbreak must follow — regardless of the values of other market variables.
-
-## OUTPUT FORMAT:
-
-You must return a JSON array containing exactly {{num_of_rules}} rule objects. Each rule object must have:
-- "reasoning": Brief explanation of why this rule predicts outbreak
-- "rule": The Boolean logic structure
-
-### Rule Structure Examples:
-
-**Single Market:**
-```json
-{
-  "reasoning": "Sufficient condition for outbreak based on selected market signals",
-  "rule": {
-    "type": "literal",
-    "name": "actual-market-id-here"
-  }
-}
-```
-
-**AND Rule (all conditions must be true):**
-```json
-{
-  "reasoning": "Sufficient condition for outbreak based on selected market signals",
-  "rule": {
-    "type": "and",
-    "children": [
-      {"type": "literal", "name": "market-id-1"},
-      {"type": "literal", "name": "market-id-2"}
-    ]
-  }
-}
-```
-
-**OR Rule (any condition being true is sufficient):**
-```json
-{
-  "reasoning": "Sufficient condition for outbreak based on selected market signals",
-  "rule": {
-    "type": "or",
-    "children": [
-      {"type": "literal", "name": "market-id-1"},
-      {"type": "literal", "name": "market-id-2"}
-    ]
-  }
-}
-```
-
-**Nested Rule (max depth 2):**
-```json
-{
-  "reasoning": "Sufficient condition for outbreak based on selected market signals",
-  "rule": {
-    "type": "and",
-    "children": [
-      {"type": "literal", "name": "market-id-1"},
-      {
-        "type": "or",
-        "children": [
-          {"type": "literal", "name": "market-id-2"},
-          {"type": "literal", "name": "market-id-3"}
-        ]
-      }
-    ]
-  }
-}
-```
+5. **Logical Guarantee**: Each rule must define a condition such that if it is true, then a massive outbreak must follow — regardless of the values of other market variables.
 
 ## AVAILABLE MARKETS:
 
@@ -103,36 +35,24 @@ Use ONLY these market IDs as variable names in your rules:
 ---
 {% endfor %}
 
-## RESPONSE FORMAT:
-
-CRITICAL JSON FORMATTING REQUIREMENTS:
-- Return ONLY a valid JSON array with {{num_of_rules}} rule objects
-- NO text before or after the JSON array
-- Use double quotes for ALL keys and values
-- NO trailing commas
-- NO single quotes
-- NO comments in JSON
-- Ensure all braces and brackets are properly closed
-- Each rule object must have exactly "reasoning" and "rule" fields
-
-Example response structure:
-```json
-[
-  {
-    "reasoning": "First rule explanation",
-    "rule": { "type": "literal", "name": "market-id-1" }
-  },
-  {
-    "reasoning": "Second rule explanation", 
-    "rule": {
-      "type": "and",
-      "children": [
-        {"type": "literal", "name": "market-id-2"},
-        {"type": "literal", "name": "market-id-3"}
-      ]
-    }
+Return JSON only—no prose—matching **exactly**:
+{
+  "reasoning": "...",
+  "verbalization": "...",
+  "rule": {
+    "node_type": "...",
+    "arguments": [ ... ]
   }
-]
-```
+}
+
+Allowed node structures inside the "rule" field:
+- Variables:
+  {"node_type": "variable", "var": "market-id"}
+- NOT:
+  {"node_type": "not", "arguments": [ <one rule> ]}
+- AND / OR:
+  {"node_type": "and" | "or", "arguments": [ <2 or 3 rules> ]}
+
+Use only these node types and structure. Each rule must follow the Boolean constraints and use only the provided market IDs.
 
 Generate {{num_of_rules}} unique, valid rules now:

@@ -18,7 +18,14 @@ from sqlmodel import Session, select
 from ml.classification import H5N1Classifier, RuleEligibilityClassifier
 from ml.clients import get_client
 from ml.ranker import DiseaseInformation, get_prompt, get_relevance
-from ml.rules import PromptInformation, RuleNode, get_rules, get_rules_prompt, get_weight
+from ml.rules import (
+    PromptInformation,
+    extract_literals_from_formula,
+    get_rules,
+    get_rules_prompt,
+    get_weight,
+    stringify_formula,
+)
 from models.markets import (
     Market,
     MarketBet,
@@ -293,56 +300,6 @@ def get_text_rep(market: Market) -> str:
         text_rep = f"""<Title>{title}</Title>
         <Description>{description}</Description>"""
     return text_rep
-
-def stringify_node(node: RuleNode, session: Session):
-    """Get a string representation of the given rule."""
-    if node.type == 'literal':
-
-        market = session.exec(
-            select(Market).where(Market.id == node.name.strip('"').strip("'"))
-        ).first()
-
-        return market.question if market else f"[Unknown: {node.name}]"
-
-    elif node.type in ['and', 'or']:
-        children = [stringify_node(child, session) for child in node.children]
-        joined = f" {node.type.upper()} ".join(f"({child})" for child in children)
-        return joined
-    elif node.type == 'not':
-        child_str = stringify_node(node.child, session)
-        return f"NOT ({child_str})"
-
-    else:
-        return "[Unknown node type]"
-
-
-def extract_literals_from_rule(rule: RuleNode) -> list[str]:
-    """
-    Extract all literal names from a logical rule, stripping surrounding quotes.
-
-    Args:
-        rule: A LogicalRule instance containing the rule tree
-
-    Returns:
-        List of cleaned literal names found in the rule
-
-    """
-    literals = []
-
-    def traverse(node: RuleNode):
-        if node.type == "literal":
-            # Strip leading/trailing quotes (single or double)
-            cleaned_name = node.name.strip('"').strip("'")
-            literals.append(cleaned_name)
-        elif node.type in ("and", "or"):
-            for child in node.children:
-                traverse(child)
-        elif node.type == "not":
-            traverse(node.child)
-
-    traverse(rule.rule if hasattr(rule, "rule") else rule)
-    return literals
-
 
 @dg.asset(
     required_resource_keys={"database_engine", "manifold_client"},
@@ -1194,25 +1151,14 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
         client = get_client()
         valid_market_ids = set(market_data.keys())
         
-        try:
-            logical_rules = get_rules(prompt, valid_market_ids, client)
-            context.log.info(f"Successfully generated {len(logical_rules)} rules")
-        except Exception as e:
-            context.log.error(f"Rule generation failed: {e}")
-            # Return empty result
-            return dg.MaterializeResult(
-                metadata={
-                    "num_rules": dg.MetadataValue.int(0),
-                    "num_markets_used": dg.MetadataValue.int(0),
-                    "error": dg.MetadataValue.text(str(e))
-                }
-            )
+        logical_rules = get_rules(prompt, valid_market_ids, client)
+        context.log.info(f"Successfully generated {len(logical_rules)} rules")
 
         used_markets = []
 
         for rule_obj in logical_rules:
             rule_json = rule_obj.rule.model_dump_json()
-            readable = stringify_node(rule_obj.rule, session)
+            readable = stringify_formula(rule_obj.rule, session)
 
             # Get disease information for prompts
             disease_info = DiseaseInformation(
@@ -1230,7 +1176,7 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
             )
 
             # Get relevance score - need to collect market metrics for this rule
-            rule_market_ids = extract_literals_from_rule(rule_obj.rule)
+            rule_market_ids = extract_literals_from_formula(rule_obj.rule)
             
             # Collect all 8 metrics for markets in this rule
             market_metrics = {}
