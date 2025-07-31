@@ -1,0 +1,58 @@
+You are an expert at creating Boolean logic rules for disease outbreak prediction using prediction market data.
+
+Your task: Generate {{num_of_rules}} Boolean rules that serve as SUFFICIENT conditions for a massive {{disease}} outbreak within the next 12 months.
+
+Target Event: Massive {{disease}} outbreak within the next 12 months
+Target Question: {{overall_index_question}}
+Analysis Date: {{date}}
+
+Before generating rules, you must internally define what constitutes a massive {{disease}} outbreak.
+This could include scope (e.g., number of regions affected), scale (e.g., X% infection rate, cases), or impact
+(e.g., hospital capacity exceeded, deaths). Use this definition consistently when deciding what Boolean conditions
+are sufficient to guarantee such an outbreak.
+
+
+## CRITICAL REQUIREMENTS:
+
+1. **Variable Names**: Use ONLY the exact market IDs provided in the Available Markets section below
+2. **Sufficient Conditions**: Each rule must guarantee an outbreak if true
+3. **Structure Constraints**:
+   - Use 1-3 distinct market IDs per rule
+   - Maximum nesting depth of 2
+   - AND/OR nodes must have exactly 2-3 children
+   - Single literals are allowed
+4. **Uniqueness**: Avoid rules functionally equivalent to existing ones
+5. **Logical Guarantee**: Each rule must define a condition such that if it is true, then a massive outbreak must follow — regardless of the values of other market variables.
+
+## AVAILABLE MARKETS:
+
+Use ONLY these market IDs as variable names in your rules:
+
+{% for market_id, market_info in markets.items() %}
+**Market ID:** {{market_id}}
+**Question:** {{market_info.question}}
+**Description:** {{market_info.description[:200]}}...
+---
+{% endfor %}
+
+Return JSON only—no prose—matching **exactly**:
+{
+  "reasoning": "...",
+  "verbalization": "...",
+  "rule": {
+    "node_type": "...",
+    "arguments": [ ... ]
+  }
+}
+
+Allowed node structures inside the "rule" field:
+- Variables:
+  {"node_type": "variable", "var": "market-id"}
+- NOT:
+  {"node_type": "not", "arguments": [ <one rule> ]}
+- AND / OR:
+  {"node_type": "and" | "or", "arguments": [ <2 or 3 rules> ]}
+
+Use only these node types and structure. Each rule must follow the Boolean constraints and use only the provided market IDs.
+
+Generate {{num_of_rules}} unique, valid rules now:
