@@ -11,7 +11,11 @@ import time
 from datetime import UTC, datetime, timedelta
 
 import dagster as dg
+import numpy as np
+import pandas as pd
 import requests
+from pydantic import TypeAdapter
+from scipy.stats import norm
 from sqlalchemy import delete, func
 from sqlmodel import Session, select
 
@@ -19,7 +23,10 @@ from ml.classification import H5N1Classifier, RuleEligibilityClassifier
 from ml.clients import get_client
 from ml.ranker import DiseaseInformation, get_prompt, get_relevance
 from ml.rules import (
+    Formula,
+    Op,
     PromptInformation,
+    Var,
     extract_literals_from_formula,
     get_rules,
     get_rules_prompt,
@@ -27,6 +34,8 @@ from ml.rules import (
     stringify_formula,
 )
 from models.markets import (
+    Index,
+    IndexRuleLink,
     Market,
     MarketBet,
     MarketComment,
@@ -176,30 +185,6 @@ def _prepare_comment(comment_data: dict) -> MarketComment:
         # internal timestamp
         updated_at=datetime.now(UTC),
     )
-
-
-def get_market_prob_at_time(session: Session, market_id: str, query_time: datetime) -> float:
-    """
-    Retrieve the most recent probability for a given market at or before the specified query time.
-
-    Args:
-        session (Session): SQLAlchemy session used to query the database.
-        market_id (str): Unique identifier for the market to query.
-        query_time (datetime): Timestamp representing the cutoff for bet history.
-
-    Returns:
-        float or None: The `prob_after` value from the latest bet before or at query_time.
-            Returns None if no such bet exists.
-
-    """
-    bet = session.exec(
-        select(MarketBet)
-        .where(MarketBet.contract_id == market_id)
-        .where(MarketBet.created_time <= query_time)
-        .order_by(MarketBet.created_time.desc())
-        .limit(1)
-    ).first()
-    return bet.prob_after if bet else None
 
 
 def get_volume(session: Session, market_id: str, query_time: datetime) -> float:
@@ -1254,3 +1239,271 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
         }
     )
 
+
+def get_market_prob_at_time(session: Session, market_id: str, query_time: datetime) -> float:
+    """
+    Retrieve the market probability at a specific query time.
+
+    Args:
+        session (Session): Active database session used for querying bets.
+        market_id (str): Unique identifier of the market to evaluate.
+        query_time (datetime): Timestamp at which to query the market's probability.
+
+    Returns:
+        float | int:
+            - The 'prob_after' value of the latest bet placed at or before `query_time`.
+            - Returns -1 if no such bet exists.
+            - Returns 1 if the market has resolved to 'yes', or 0 if resolved to 'no'.
+
+    """
+    resolution = session.exec(select(Market.resolution).where(Market.id == market_id)).first()
+
+    if resolution == "YES":
+        return 1.0
+    elif resolution == "NO":
+        return 0.0
+    else:
+        # Get the most recent bet before or at query_time
+        bet = session.exec(
+            select(MarketBet.prob_after)
+            .where(MarketBet.contract_id == market_id)
+            .where(MarketBet.created_time <= query_time)
+            .order_by(MarketBet.created_time.desc())
+            .limit(1)
+        ).first()
+        # return -1 if no bet as a flag
+        return bet if bet is not None else -1
+
+
+def eval_formula(formula: Formula, world_row: np.ndarray, market_index_map: dict[str, int]) -> bool:
+    """
+    Recursively evaluates a Boolean formula against a binary simulation row.
+
+    Args:
+        formula (Formula): A parsed Boolean formula (Var or Op).
+        world_row (np.ndarray): A binary array representing a simulation.
+        market_index_map (dict[str, int]): Mapping from var names to column indices in world_row.
+
+    Returns:
+        bool: The result of evaluating the formula under the current simulation.
+
+    """
+    # Base case: if the formula is a variable node, look up its value in the world row
+    if isinstance(formula, Var):
+        idx = market_index_map.get(formula.variable_name)
+        return bool(world_row[idx])  # Convert to bool in case it's a float or int
+
+    # Recursive case: formula is a logical operation (AND, OR, NOT, etc.)
+    elif isinstance(formula, Op):
+        # Evaluate all child formulas recursively
+        args = [eval_formula(arg, world_row, market_index_map) for arg in formula.arguments]
+        op = formula.node_type
+
+        # Apply the Boolean operator to the evaluated arguments
+        if op == "and":
+            return all(args)               # True if all subformulas are True
+        elif op == "or":
+            return any(args)              # True if any subformula is True
+        elif op == "not":
+            return not args[0]            # True if the only child is False
+        elif op == "xor":
+            return sum(args) % 2 == 1     # True if exactly one argument is True
+        elif op == "nand":
+            return not all(args)          # True if not all are True (negated AND)
+        elif op == "nor":
+            return not any(args)          # True if all are False (negated OR)
+        else:
+            raise ValueError(f"Unknown operator: {op}") # should never happen if model is validated
+
+    # if input is not a Var or Op, raise an error
+    else:
+        raise TypeError(f"Invalid formula node: {formula}")
+
+
+@dg.asset(
+    deps=[index_rules],
+    required_resource_keys={"database_engine"},
+    description="Monte Carlo simulation for H5N1 outbreak probability using Gaussian copula."
+)
+def index_value(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
+    """Run Monte Carlo simulation to calculate H5N1 outbreak probability."""
+    # set seed
+    np.random.seed(42)
+    with (Session(context.resources.database_engine) as session):
+        # Get the most recent 30 rules (THIS ASSUMES THAT EACH TIME WE GENERATE RULES WE GEN 30,
+        # I PLAN TO ADD A RULE BATCH NUMBER OR SOMETHING OF THAT SORT TO FIX THIS)
+        rules = session.exec(
+            select(MarketRule).order_by(MarketRule.created_at.desc()).limit(30)
+        ).all()
+
+        if not rules:
+            context.log.warning("No rules with weights found for simulation.")
+            return dg.MaterializeResult(metadata={})
+
+        # get info from the rules
+        rule_ids = [r.id for r in rules]
+        rule_strength_weights = [r.strength_weight for r in rules]
+        rule_relevance_weights = [r.relevance_weight for r in rules]
+        rule_avg_weights = [
+            (s + r) / 2 for s, r in zip(rule_strength_weights, rule_relevance_weights, strict=False)
+        ]
+
+        # Get market links and unique markets from rules
+        market_links_by_rule = {}
+        all_market_ids = set()
+        for rule in rules:
+            market_ids = list(session.exec(
+                select(MarketRuleLink.market_id).where(MarketRuleLink.rule_id == rule.id)
+            ))
+            market_links_by_rule[rule.id] = market_ids
+            all_market_ids.update(market_ids)
+
+        unique_literals = list(all_market_ids)
+
+        # Create index of timestamps
+        end_date = datetime.now(UTC)
+        # use up to 60 days worth of data
+        start_date = end_date - timedelta(days=60)
+        time_index = pd.date_range(start=start_date, end=end_date, freq='1h')
+
+        # Initialize empty DataFrame
+        df_probs = pd.DataFrame(index=time_index, columns=unique_literals, dtype=float)
+
+        # Fill DataFrame using market lookup function
+        for market_id in unique_literals:
+            for timestamp in time_index:
+                prob = get_market_prob_at_time(session, market_id, timestamp)
+                df_probs.at[timestamp, market_id] = prob
+
+        # Gaussian copula correlation matrix
+        # all probs that were not found (ie, that were -1 and NaN)
+        df_probs_clean = df_probs.replace(-1, np.nan)
+        # transform probabilities into a latent Gaussian space
+        # inverse CDF (quantile function) of the standard normal distribution
+        latent_vars = df_probs_clean.apply(norm.ppf)
+        # the Pearson correlation matrix
+        # min_periods=10 so we only compute correlation if there are at least 10
+        # overlapping time points — otherwise it returns NaN.
+        # NaNs in the correlation matrix are replaced with 0,
+        # assuming independence between those pairs
+        corr_df = latent_vars.corr(min_periods=10).fillna(0)
+        corr_matrix = corr_df.values
+
+        # thresholds are equal to the current market prob (most recent prob_after)
+        thresholds_dict = {}
+        for market_id in unique_literals:
+            series = df_probs[market_id].dropna()
+            thresholds_dict[market_id] = series.iloc[-1]
+
+        # sample worlds using copula
+        dim = len(unique_literals)
+        thresholds = np.array([
+            norm.ppf(np.clip(thresholds_dict.get(lit), 1e-6, 1 - 1e-6))
+            for lit in unique_literals
+        ])
+
+        # make sure the matrix is PSD
+        # to sample from a multivariate normal with np.random.multivariate_normal,
+        # we need PSD covariance matrix
+        eps = 1e-3
+        # corr_matrix = eigvecs @ np.diag(eigvals) @ eigvecs.T
+        eigvals, eigvecs = np.linalg.eigh(corr_matrix)
+        # Eigenvalues must be ≥ 0 for the matrix to be PSD
+        eigvals_clipped = np.clip(eigvals, eps, None)
+        # corr_psd = eigvecs @ np.diag(eigvals_clipped) @ eigvecs.T
+        corr_psd = eigvecs @ np.diag(eigvals_clipped) @ eigvecs.T
+
+        # sample 10000 "worlds"
+        z_samples = np.random.multivariate_normal(mean=np.zeros(dim), cov=corr_psd, size=10000)
+        # make markets true or false based on thresholds
+        bool_samples = (z_samples < thresholds).astype(bool)
+
+        # normalize rule weights
+        weights = np.array(rule_avg_weights)
+        norm_weights = weights / weights.sum()
+
+        # set up for evaluating the rules
+        market_index_map = {name: idx for idx, name in enumerate(unique_literals)}
+        n_simulations = bool_samples.shape[0]
+        rule_indicator_matrix = np.zeros((n_simulations, len(rules)))
+
+        # for rule, turn it back into a formula and evaluate it for each world
+        for i, rule in enumerate(rules):
+            try:
+                raw_rule = rule.rule
+                if isinstance(raw_rule, str):
+                    raw_rule = json.loads(raw_rule)
+                adapter = TypeAdapter(Formula)
+                formula = adapter.validate_python(raw_rule)
+            except Exception as e:
+                context.log.warning(f"Failed to parse rule {rule.id}: {e}")
+                continue
+
+            for j in range(n_simulations):
+                world_row = bool_samples[j]
+                try:
+                    rule_result = eval_formula(formula, world_row, market_index_map)
+                    rule_indicator_matrix[j, i] = float(rule_result)
+                except Exception as e:
+                    context.log.warning(f"Error evaluating rule {rule.id} on simulation {j}: {e}")
+
+        # use the weights to score each world for how risky it is
+        scores = rule_indicator_matrix @ norm_weights
+        risk_index = scores.mean()
+
+        # build a json summary of the rules in the sim
+        rules_json = []
+        for rule in rules:
+            rules_json.append({
+                "id": rule.id,
+                "readable_rule": rule.readable_rule,
+                "rule": rule.rule,
+                "strength_weight": rule.strength_weight,
+                "relevance_weight": rule.relevance_weight,
+                "avg_weight": ((rule.strength_weight) + (rule.relevance_weight)) / 2,
+                "chain_of_thoughts": rule.chain_of_thoughts,
+                "strength_scores": json.loads(rule.strength_scores or "[]"),
+                "relevance_scores": json.loads(rule.relevance_scores or "[]"),
+                "strength_chain": rule.strength_chain,
+                "relevance_chain": rule.relevance_chain,
+                "market_ids": [m.id for m in rule.markets]
+            })
+
+        # json rep of the simulation
+        json_rep = {
+            "index_probability": risk_index,
+            "market_ids_in_rules": list(unique_literals),
+            "rules": rules_json
+        }
+
+        # add to the DB
+        new_index = Index(
+            index_probability=float(risk_index),
+            created_at=datetime.now(UTC),
+            json_representation=str(json_rep)
+        )
+        session.add(new_index)
+        session.flush()
+        context.log.info("Added index")
+        for rule_id in rule_ids:
+            # The rule contains actual rules IDs, not text representations
+            rule_obj = session.exec(
+                select(MarketRule).where(MarketRule.id == rule_id)
+            ).first()
+
+            if rule_obj:
+                new_link = IndexRuleLink(
+                    rule_id=rule_obj.id,
+                    index_id=new_index.id,
+                )
+                session.add(new_link)
+            else:
+                context.log.warning(f"Rule not found for ID: {rule_id}")
+        session.commit()
+
+        return dg.MaterializeResult(
+            metadata={
+                "risk_index": float(risk_index),
+                "num_rules_used": len(rules),
+            }
+        )
