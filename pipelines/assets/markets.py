@@ -1451,8 +1451,7 @@ def index_value(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
         for i, rule in enumerate(rules):
             try:
                 raw_rule = rule.rule
-                if isinstance(raw_rule, str):
-                    raw_rule = json.loads(raw_rule)
+                raw_rule = json.loads(raw_rule)
                 adapter = TypeAdapter(Formula)
                 formula = adapter.validate_python(raw_rule)
             except Exception as e:
@@ -1500,7 +1499,7 @@ def index_value(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
         new_index = Index(
             index_probability=float(risk_index),
             created_at=datetime.now(UTC),
-            json_representation=str(json_rep)
+            json_representation=json.dumps(json_rep)
         )
         session.add(new_index)
         session.flush()
