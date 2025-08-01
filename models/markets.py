@@ -264,6 +264,8 @@ class MarketRule(SQLModel, table=True):
     # chain of thoughts for the weights
     strength_chain: str | None = None
     relevance_chain: str | None = None
+    # batch id
+    batch_id: int | None = None
 
     # Relationship
     markets: list["Market"] = Relationship(

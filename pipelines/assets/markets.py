@@ -1108,6 +1108,15 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
             context.log.warning("No eligible markets found.")
             return dg.MaterializeResult(metadata={})
 
+        last_batch_number = session.exec(
+            select(MarketRule.batch_id).order_by(MarketRule.created_at.desc()).limit(1)
+        ).first()
+
+        if last_batch_number is None:
+            batch_number = 1
+        else:
+            batch_number = last_batch_number + 1
+
         # Build structured market data for prompt
         market_data = {}
         for market in markets_to_process:
@@ -1206,6 +1215,7 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
                 relevance_chain=str(relevance_reasonings),
                 strength_scores=str(strength_scores),
                 relevance_scores=str(relevance_scores),
+                batch_id=batch_number
             )
             session.add(new_rule)
             session.flush()  # Ensures new_rule.id is available
@@ -1330,10 +1340,20 @@ def index_value(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     # set seed
     np.random.seed(42)
     with (Session(context.resources.database_engine) as session):
-        # Get the most recent 30 rules (THIS ASSUMES THAT EACH TIME WE GENERATE RULES WE GEN 30,
-        # I PLAN TO ADD A RULE BATCH NUMBER OR SOMETHING OF THAT SORT TO FIX THIS)
+        # get the most recent batch number
+        latest_batch = session.exec(
+            select(MarketRule.batch_id)
+            .order_by(MarketRule.created_at.desc())
+            .limit(1)
+        ).first()
+
+        if latest_batch is None:
+            context.log.warning("No rules found in the database.")
+            return dg.MaterializeResult(metadata={})
+
+        # get all rules with that batch number
         rules = session.exec(
-            select(MarketRule).order_by(MarketRule.created_at.desc()).limit(30)
+            select(MarketRule).where(MarketRule.batch_id == latest_batch)
         ).all()
 
         if not rules:
