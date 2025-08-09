@@ -21,6 +21,17 @@ class MarketRuleLink(SQLModel, table=True):
     market: "Market" = Relationship()
     rule: "MarketRule" = Relationship()
 
+class IndexRuleLink(SQLModel, table=True):
+    """Table linking indicies and rules."""
+
+    __tablename__ = "index_rule_links"
+
+    index_id: int = Field(foreign_key="index.id", primary_key=True)
+    rule_id: int = Field(foreign_key="market_rules.id", primary_key=True)
+
+    index: "Index" = Relationship()
+    rule: "MarketRule" = Relationship()
+
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # API data
@@ -253,9 +264,34 @@ class MarketRule(SQLModel, table=True):
     # chain of thoughts for the weights
     strength_chain: str | None = None
     relevance_chain: str | None = None
+    # batch id
+    batch_id: int | None = None
 
     # Relationship
     markets: list["Market"] = Relationship(
         back_populates="rules",
         link_model=MarketRuleLink
     )
+
+    indices: list["Index"] = Relationship(
+        back_populates="rules", link_model=IndexRuleLink
+    )
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Indexcast index
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+class Index(SQLModel, table=True):
+    """Monte Carlo simulation results for H5N1 outbreak probability."""
+
+    __tablename__ = "index"
+
+    id: int = Field(primary_key=True)
+    index_probability: float = Field(description="Calculated probability of H5N1 outbreak")
+    json_representation: str | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    rules: list["MarketRule"] = Relationship(
+        back_populates="indices", link_model=IndexRuleLink
+    )
+
+
