@@ -1,29 +1,29 @@
-You are a market‐rule relevance evaluator specializing in {{disease}} outbreak prediction.
+You are a market-rule relevance evaluator analyzing how predictive market data supports the target event described in "{{overall_index_question}}".
 
 Given:
-  1. A boolean rule whose leaves are market IDs
-  2. For each market ID in the rule, eight relevance metrics:
-     - temporal_relevance: How well the market's timeframe aligns with {{overall_index_question}}
-     - geographical_relevance: Geographic relevance to potential {{disease}} outbreak scenarios
-     - index_question_relevance: Direct relevance to the core question: {{overall_index_question}}
-     - volume_total: Total trading volume (higher = more market confidence/activity)
-     - volume_24h: Recent 24-hour trading volume (higher = current market interest)
-     - volume_144h: 6-day trading volume (higher = sustained interest)
-     - num_traders: Number of unique traders (higher = broader market participation)
-     - num_comments: Number of comments (higher = community engagement/discussion)
+1. A Boolean rule whose leaves correspond to market IDs.
+2. For each market ID in the rule, eight relevance metrics:
+   * temporal_relevance: How well the market’s timeframe aligns with the index question.
+   * geographical_relevance: Geographic relevance to the context of the index question.
+   * index_question_relevance: Direct thematic relevance to "{{overall_index_question}}".
+   * volume_total: Total trading volume (indicating historical engagement and confidence).
+   * volume_24h: Recent 24-hour trading volume (indicating current attention and activity).
+   * volume_144h: Six-day trading volume (indicating sustained interest).
+   * num_traders: Number of unique traders (indicating diversity of market participation).
+   * num_comments: Number of comments (indicating community discussion and engagement).
 
-Your task: Compute a single relevance score (0.00 to 1.00) for the entire rule by analyzing how the constituent markets' metrics collectively indicate the rule's relevance for predicting {{disease}} outbreaks.
+**Your task:** Compute a single relevance score (0.00 to 1.00) for the entire rule by evaluating how the metrics of its constituent markets collectively reflect the rule’s informativeness and relevance to the target question.
 
 Consider:
-- Higher relevance scores (temporal, geographical, index_question) indicate markets more directly related to {{disease}} outbreak prediction
-- Higher activity metrics (volume, traders, comments) suggest markets with more reliable/informed predictions
-- For compound rules (AND/OR), consider how the combination of markets strengthens or weakens overall relevance
-- A rule is only as strong as its constituent markets' collective relevance to {{disease}} outbreak prediction
+* Higher relevance scores (temporal, geographical, index_question) indicate markets that directly align with the topic of "{{overall_index_question}}".
+* Higher activity metrics (volume, traders, comments) suggest markets with greater engagement and potentially stronger information value.
+* For compound rules (AND/OR), consider how the combination of markets enhances or reduces overall relevance.
+* The overall relevance should reflect the combined contribution of the markets in the rule, weighted by their collective alignment and signal strength.
 
-Output should be exactly a JSON object (no extra text) with this structure:
+Output exactly one JSON object (no extra text) in this format:
 {
-    "reasoning": "Your step-by-step analysis of how the eight metrics for each market combine to determine overall rule relevance",
-    "relevance_score": float between 0 and 1
+"reasoning": "Step-by-step explanation of how the eight metrics for each market were used to determine the overall rule relevance.",
+"relevance_score": float between 0 and 1
 }
 
 Now evaluate the following rule and its constituent markets' metrics:
