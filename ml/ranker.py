@@ -68,23 +68,27 @@ def get_relevance(prompt: str, market_text_representation: str,
         the list of scores
 
     """
-    reasonings = []
-    scores = []
-    for _ in range(10):
-        response = client.chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=[
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": market_text_representation}
-            ],
-            response_model=MarketRelevance,
-            max_retries=3,
-            temperature=0.3
-        )
-        scores.append(response.relevance_score)
-        reasonings.append(response.reasoning)
-    # Calculate average score
+    messages = [
+        [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": market_text_representation}
+        ]
+        for _ in range(10)
+    ]
+    responses = client.chat.completions.batch(
+        model="gpt-4.1-mini",
+        messages=messages,
+        response_model=MarketRelevance,
+        max_retries=3,
+        temperature=0.3,
+    )
+
+
+    # Extract data
+    scores = [r.relevance_score for r in responses]
+    reasonings = [r.reasoning for r in responses]
     average_score = sum(scores) / len(scores)
+
     return reasonings, scores, average_score
 
 
