@@ -41,11 +41,12 @@ from models.markets import (
     MarketComment,
     MarketLabel,
     MarketLabelType,
+    MarketPipelineEvent,
     MarketRelevanceScore,
     MarketRelevanceScoreType,
     MarketRule,
     MarketRuleLink,
-    MarketUpdate,
+    PipelineStageType,
 )
 from pipelines.resources.db import locked_session
 
@@ -350,53 +351,47 @@ def manifold_markets(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     )
 
 
-@dg.asset(
+
+@ dg.asset(
     deps=[manifold_markets],
     required_resource_keys={"database_engine"},
     description="Market labels table."
 )
 def market_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     """Update market labels when materialized."""
-    # Only process markets that are new or updated since last classification
+    now = datetime.now(UTC)
+
     with Session(context.resources.database_engine) as session:
+        # Only process markets that haven't completed the CLASSIFIED stage yet
+        subquery = select(MarketPipelineEvent.market_id).where(
+            MarketPipelineEvent.stage_id == PipelineStageType.CLASSIFIED
+        )
         markets_to_process = session.exec(
-            select(Market)
-            .outerjoin(MarketUpdate, Market.id == MarketUpdate.market_id)
-            .where(
-                # Never classified or market updated since last classification
-                (MarketUpdate.classified_at.is_(None)) |
-                (Market.updated_at > MarketUpdate.classified_at)
-            )
+            select(Market).where(Market.id.not_in(subquery))
         ).all()
 
         num_markets_processed = len(markets_to_process)
-        context.log.info(
-            f"Found {num_markets_processed} markets needing classification."
-        )
+        context.log.info(f"Found {num_markets_processed} markets needing classification.")
 
-    # Apply classification logic
-    classification_results = []
-    h5n1_classifier = H5N1Classifier()
-    for m in markets_to_process:
-        context.log.debug(f"Processing market: {m.id} - {m.question}")
-        classification_results.append(
-            (m.id, h5n1_classifier.predict(m))
-        )
-    num_markets_h5n1 = sum(1 for _, is_h5n1 in classification_results if is_h5n1)
+        # Apply classification logic
+        classification_results = []
+        h5n1_classifier = H5N1Classifier()
+        for market in markets_to_process:
+            context.log.debug(f"Processing market: {market.id} - {market.question}")
+            classification_results.append((market.id, h5n1_classifier.predict(market)))
 
-    # Obtain id of h5n1 label type
-    with Session(context.resources.database_engine) as session:
+        num_markets_h5n1 = sum(1 for _, is_h5n1 in classification_results if is_h5n1)
+
+        # Obtain id of h5n1 label type
         result = session.exec(
             select(MarketLabelType).where(MarketLabelType.label_name == "h5n1")
         ).first()
         h5n1_label_type_id = result.id
         context.log.debug(f"Found H5N1 label type ID: {h5n1_label_type_id}")
 
-    # Update classification results in the database
-    current_time = datetime.now(UTC)
-    with Session(context.resources.database_engine) as session:
-        for (market_id, is_h5n1) in classification_results:
-            # Update market labels
+        # Update classification results and record pipeline stage
+        for market_id, is_h5n1 in classification_results:
+            # Update labels
             existing_label = session.exec(
                 select(MarketLabel).where(
                     (MarketLabel.market_id == market_id) &
@@ -405,34 +400,28 @@ def market_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
             ).first()
 
             if is_h5n1 and not existing_label:
-                # Add label if classified as h5n1 and label does not exist
-                market_label = MarketLabel(
-                    market_id=market_id,
-                    label_type_id=h5n1_label_type_id
-                )
-                session.add(market_label)
+                session.add(MarketLabel(market_id=market_id, label_type_id=h5n1_label_type_id))
             elif not is_h5n1 and existing_label:
-                # Remove label if not classified as h5n1 and label exists
                 session.delete(existing_label)
 
-            # Track this market was classified
-            existing_update = session.exec(
-                select(MarketUpdate).where(MarketUpdate.market_id == market_id)
+            # Track that the market completed the CLASSIFIED stage
+            existing_event = session.exec(
+                select(MarketPipelineEvent).where(
+                    (MarketPipelineEvent.market_id == market_id) &
+                    (MarketPipelineEvent.stage_id == PipelineStageType.CLASSIFIED)
+                )
             ).first()
 
-            if existing_update:
-                # Update classified_at field
-                existing_update.classified_at = current_time
-            else:
-                # Create new MarketUpdate with classified_at timestamp
-                market_update = MarketUpdate(
-                    market_id=market_id,
-                    classified_at=current_time
+            if not existing_event:
+                session.add(
+                    MarketPipelineEvent(
+                        market_id=market_id,
+                        stage_id=PipelineStageType.CLASSIFIED,
+                        completed_at=now
+                    )
                 )
-                session.add(market_update)
 
-            session.commit()
-
+        session.commit()
 
     return dg.MaterializeResult(
         metadata={
@@ -555,15 +544,24 @@ def manifold_full_markets(context: dg.AssetExecutionContext) -> dg.MaterializeRe
 
         total_bets_updated += len(all_bets)
 
+        # Track FULL_MARKET stage completion
         with Session(context.resources.database_engine) as session:
-            # update the time for full market at
-            row = session.get(MarketUpdate, m)
-            row.full_market_at = datetime.now(UTC)
-            session.commit()
+            existing_event = session.exec(
+                select(MarketPipelineEvent).where(
+                    (MarketPipelineEvent.market_id == m) &
+                    (MarketPipelineEvent.stage_id == PipelineStageType.FULL_MARKET)
+                )
+            ).first()
 
-        context.log.info(
-            f"Market {m}: updated {len(all_bets)} bets."
-        )
+            if not existing_event:
+                session.add(
+                    MarketPipelineEvent(
+                        market_id=m,
+                        stage_id=PipelineStageType.FULL_MARKET,
+                        completed_at=datetime.now(UTC)
+                    )
+                )
+                session.commit()
 
     return dg.MaterializeResult(
         metadata={
@@ -603,8 +601,22 @@ def relevance_summary_statistics(context: dg.AssetExecutionContext) -> dg.Materi
             types_to_delete = ["volume_24h", "num_comments", "volume_total",
                                "volume_144h", "num_traders"]
             type_ids = [score_type_map[name] for name in types_to_delete if name in score_type_map]
-            row = session.get(MarketUpdate, market_id)
-            row.market_data_relevances_recorded_at = datetime.now(UTC)
+            existing_event = session.exec(
+                select(MarketPipelineEvent).where(
+                    (MarketPipelineEvent.market_id == market_id) &
+                    (MarketPipelineEvent.stage_id ==
+                     PipelineStageType.MARKET_DATA_RELEVANCES_RECORDED)
+                )
+            ).first()
+
+            if not existing_event:
+                session.add(
+                    MarketPipelineEvent(
+                        market_id=market_id,
+                        stage_id=PipelineStageType.MARKET_DATA_RELEVANCES_RECORDED,
+                        completed_at=datetime.now(UTC)
+                    )
+                )
             session.exec(
                 delete(MarketRelevanceScore)
                 .where(MarketRelevanceScore.market_id == market_id)
@@ -728,9 +740,22 @@ def relevance_temporal(context: dg.AssetExecutionContext) -> dg.MaterializeResul
         context.log.info(f"Temporal relevance computed for market: {market_id}.")
 
     with locked_session(context.resources.database_engine) as session:
-        for m in market_ids_to_delete:
-            row = session.get(MarketUpdate, m)
-            row.temp_relevance_scored_at = datetime.now(UTC)
+        for _m in market_ids_to_delete:
+            existing_event = session.exec(
+                select(MarketPipelineEvent).where(
+                    (MarketPipelineEvent.market_id == market_id) &
+                    (MarketPipelineEvent.stage_id == PipelineStageType.TEMP_RELEVANCE_SCORED)
+                )
+            ).first()
+
+            if not existing_event:
+                session.add(
+                    MarketPipelineEvent(
+                        market_id=market_id,
+                        stage_id=PipelineStageType.TEMP_RELEVANCE_SCORED,
+                        completed_at=datetime.now(UTC)
+                    )
+                )
 
         session.exec(
             delete(MarketRelevanceScore)
@@ -816,9 +841,22 @@ def relevance_geographical(context: dg.AssetExecutionContext) -> dg.MaterializeR
         context.log.info(f"Geographical relevance computed for market: {market_id}.")
 
     with locked_session(context.resources.database_engine) as session:
-        for m in market_ids_to_delete:
-            row = session.get(MarketUpdate, m)
-            row.geo_relevance_scored_at = datetime.now(UTC)
+        for _m in market_ids_to_delete:
+            existing_event = session.exec(
+                select(MarketPipelineEvent).where(
+                    (MarketPipelineEvent.market_id == market_id) &
+                    (MarketPipelineEvent.stage_id == PipelineStageType.GEO_RELEVANCE_SCORED)
+                )
+            ).first()
+
+            if not existing_event:
+                session.add(
+                    MarketPipelineEvent(
+                        market_id=market_id,
+                        stage_id=PipelineStageType.GEO_RELEVANCE_SCORED,
+                        completed_at=datetime.now(UTC)
+                    )
+                )
 
         session.exec(
             delete(MarketRelevanceScore)
@@ -904,9 +942,23 @@ def relevance_index_question(context: dg.AssetExecutionContext) -> dg.Materializ
 
 
     with locked_session(context.resources.database_engine) as session:
-        for m in market_ids_to_delete:
-            row = session.get(MarketUpdate, m)
-            row.index_question_relevance_scored_at = datetime.now(UTC)
+        for _m in market_ids_to_delete:
+            existing_event = session.exec(
+                select(MarketPipelineEvent).where(
+                    (MarketPipelineEvent.market_id == market_id) &
+                    (MarketPipelineEvent.stage_id ==
+                     PipelineStageType.INDEX_QUESTION_RELEVANCE_SCORED)
+                )
+            ).first()
+
+            if not existing_event:
+                session.add(
+                    MarketPipelineEvent(
+                        market_id=market_id,
+                        stage_id=PipelineStageType.INDEX_QUESTION_RELEVANCE_SCORED,
+                        completed_at=datetime.now(UTC)
+                    )
+                )
 
         session.exec(
             delete(MarketRelevanceScore)
@@ -1010,9 +1062,22 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
     num_skipped = 0
     for m in markets_to_process:
         with Session(context.resources.database_engine) as session:
-            row = session.get(MarketUpdate, m.id)
-            row.rule_eligibility_at = datetime.now(UTC)
-            session.commit()
+            existing_event = session.exec(
+                select(MarketPipelineEvent).where(
+                    (MarketPipelineEvent.market_id == m.id) &
+                    (MarketPipelineEvent.stage_id == PipelineStageType.RULE_ELIGIBILITY)
+                )
+            ).first()
+
+            if not existing_event:
+                session.add(
+                    MarketPipelineEvent(
+                        market_id=m.id,
+                        stage_id=PipelineStageType.RULE_ELIGIBILITY,
+                        completed_at=datetime.now(UTC)
+                    )
+                )
+                session.commit()
 
         temp_score = score_lookup.get((m.id, temporal_score_type_id))
         geo_score = score_lookup.get((m.id, geo_score_type_id))

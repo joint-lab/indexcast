@@ -6,6 +6,8 @@ Authors:
 - Erik Arnold <ewarnold@uvm.edu>
 """
 from datetime import UTC, datetime
+from enum import IntEnum
+from typing import Optional
 
 from sqlmodel import Field, Relationship, SQLModel
 
@@ -18,8 +20,8 @@ class MarketRuleLink(SQLModel, table=True):
     market_id: str = Field(foreign_key="markets.id", primary_key=True)
     rule_id: int = Field(foreign_key="market_rules.id", primary_key=True)
 
-    market: "Market" = Relationship()
-    rule: "MarketRule" = Relationship()
+    market: Optional["Market"] = Relationship()
+    rule: Optional["MarketRule"] = Relationship()
 
 class IndexRuleLink(SQLModel, table=True):
     """Table linking indicies and rules."""
@@ -80,12 +82,12 @@ class Market(SQLModel, table=True):
     # Relationships
     comments: list["MarketComment"] = Relationship(back_populates="market")
     labels: list["MarketLabel"] = Relationship(back_populates="market")
-    updates: list["MarketUpdate"] = Relationship(back_populates="market")
+    pipeline_events: list["MarketPipelineEvent"] = Relationship(back_populates="market")
     scores: list["MarketRelevanceScore"] = Relationship(back_populates="market")
     bets: list["MarketBet"] = Relationship(back_populates="market")
     rules: list["MarketRule"] = Relationship(
         back_populates="markets",
-        link_model=MarketRuleLink
+        link_model=MarketRuleLink,
     )
 
 class MarketComment(SQLModel, table=True):
@@ -197,9 +199,11 @@ class MarketLabel(SQLModel, table=True):
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # Market ranking
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-from enum import IntEnum
+
+
 class MarketRelevanceScoreType(IntEnum):
     """MarketRelevance IDs."""
+
     VOLUME_TOTAL = 1
     VOLUME_24H = 2
     VOLUME_144h = 3
@@ -237,34 +241,89 @@ class MarketRelevanceScore(SQLModel, table=True):
     __tablename__ = "market_relevance_scores"
 
     market_id: str = Field(primary_key=True, foreign_key="markets.id")
-    score_type_id: int = Field(primary_key=True, foreign_key="market_relevance_score_types.id")
+    score_type_id: int = Field(primary_key=True)
     score_value: float
     scores: str | None = None
     chain_of_thoughts: str | None = None
 
     # Relationships
     market: "Market" = Relationship(back_populates="scores")
-    score_type: MarketRelevanceScoreType = Relationship(back_populates="market_scores")
+
+    @property
+    def score_type(self) -> MarketRelevanceScoreType:
+        """Get the score type as an enum."""
+        return MarketRelevanceScoreType(self.score_type_id)
+
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-# Market updates
+# Pipeline stages
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-class MarketUpdate(SQLModel, table=True):
-    """Junction table linking markets to last time they underwent parts of the pipeline."""
 
-    __tablename__ = "market_updates"
+class PipelineStageType(IntEnum):
+    """Pipeline stage IDs."""
 
-    market_id: str = Field(primary_key=True, foreign_key="markets.id")
-    classified_at: datetime | None = None
-    full_market_at: datetime | None = None
-    market_data_relevances_recorded_at: datetime | None = None
-    temp_relevance_scored_at: datetime | None = None
-    geo_relevance_scored_at: datetime | None = None
-    index_question_relevance_scored_at: datetime | None = None
-    rule_eligibility_at: datetime | None = None
+    CLASSIFIED = 1
+    FULL_MARKET = 2
+    MARKET_DATA_RELEVANCES_RECORDED = 3
+    TEMP_RELEVANCE_SCORED = 4
+    GEO_RELEVANCE_SCORED = 5
+    INDEX_QUESTION_RELEVANCE_SCORED = 6
+    RULE_ELIGIBILITY = 7
+
+    @property
+    def stage_name(self) -> str:
+        """Get stage name string."""
+        return self.name.lower()
+
+    @classmethod
+    def from_string(cls, name: str) -> "PipelineStage":
+        """Get PipelineStage from string name."""
+        mapping = {
+            "classified": cls.CLASSIFIED,
+            "full_market": cls.FULL_MARKET,
+            "market_data_relevances_recorded": cls.MARKET_DATA_RELEVANCES_RECORDED,
+            "temp_relevance_scored": cls.TEMP_RELEVANCE_SCORED,
+            "geo_relevance_scored": cls.GEO_RELEVANCE_SCORED,
+            "index_question_relevance_scored": cls.INDEX_QUESTION_RELEVANCE_SCORED,
+            "rule_eligibility": cls.RULE_ELIGIBILITY,
+        }
+        if name not in mapping:
+            raise ValueError(f"Invalid pipeline stage name: {name}")
+        return mapping[name]
+
+
+class PipelineStage(SQLModel, table=True):
+    """Lookup table for pipeline stages."""
+
+    __tablename__ = "pipeline_stages"
+
+    id: int = Field(primary_key=True)
+    stage_name: str = Field(unique=True, nullable=False)
+    description: str | None = None
 
     # Relationships
-    market: "Market" = Relationship(back_populates="updates")
+    events: list["MarketPipelineEvent"] = Relationship(back_populates="stage")
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Market pipeline events
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+class MarketPipelineEvent(SQLModel, table=True):
+    """Track when markets complete pipeline stages (using enum for stage type)."""
+
+    __tablename__ = "market_pipeline_events"
+
+    market_id: str = Field(primary_key=True, foreign_key="markets.id")
+    stage_id: int = Field(foreign_key="pipeline_stages.id", primary_key=True)
+    completed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    # Relationships
+    market: "Market" = Relationship(back_populates="pipeline_events")
+    stage: "PipelineStage" = Relationship(back_populates="events")
+
+    @property
+    def stage_type(self) -> PipelineStageType:
+        """Get the pipeline stage type as an enum."""
+        return PipelineStageType(self.stage_id)
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # Market rules
