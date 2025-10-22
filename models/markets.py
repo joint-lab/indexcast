@@ -197,16 +197,39 @@ class MarketLabel(SQLModel, table=True):
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # Market ranking
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-class MarketRelevanceScoreType(SQLModel, table=True):
-    """Types of market relevance scores."""
+from enum import IntEnum
+class MarketRelevanceScoreType(IntEnum):
+    """MarketRelevance IDs."""
+    VOLUME_TOTAL = 1
+    VOLUME_24H = 2
+    VOLUME_144h = 3
+    NUM_TRADERS = 4
+    NUM_COMMENTS = 5
+    TEMPORAL_RELEVANCE = 6
+    GEOGRAPHICAL_RELEVANCE = 7
+    INDEX_QUESTION_RELEVANCE = 8
 
-    __tablename__ = "market_relevance_score_types"
+    @property
+    def relevance_score(self) -> str:
+        """Get relevance score name string."""
+        return self.name.lower()  # will return, say "volume_total"
 
-    id: int = Field(default=None, primary_key=True)
-    score_name: str = Field(unique=True)
-
-    # Relationship back to market scores
-    market_scores: list["MarketRelevanceScore"] = Relationship(back_populates="score_type")
+    @classmethod
+    def from_string(cls, name: str) -> "MarketRelevanceScoreType":
+        """Get MarketRelevanceScoreType from string name."""
+        mapping = {
+            "volume_total": cls.VOLUME_TOTAL,
+            "volume_24h": cls.VOLUME_24H,
+            "volume_144h": cls.VOLUME_144h,
+            "num_traders": cls.NUM_TRADERS,
+            "num_comments": cls.NUM_COMMENTS,
+            "temporal_relevance": cls.TEMPORAL_RELEVANCE,
+            "geographical_relevance": cls.GEOGRAPHICAL_RELEVANCE,
+            "index_question_relevance": cls.INDEX_QUESTION_RELEVANCE,
+        }
+        if name not in mapping:
+            raise ValueError(f"Invalid market releavnce score type name: {name}")
+        return mapping[name]
 
 class MarketRelevanceScore(SQLModel, table=True):
     """Relevance scores assigned to markets by the ranker."""
