@@ -9,7 +9,7 @@ dependencies = [
     "dagster>=1.10.20",
     "dagster-webserver>=1.10.20",
     "filelock>=3.18.0",
-    "instructor>=1.8.3",
+    "instructor==1.11.3",
     "openai>=1.86.0",
     "pandas>=2.3.1",
     "pydantic>=2.11.7",
