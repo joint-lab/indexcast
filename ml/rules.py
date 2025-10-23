@@ -202,38 +202,30 @@ def get_rules_chunked(
     all_rules = []
     chunks_needed = (total_rules + chunk_size - 1) // chunk_size
 
-    prompts = []
     for _chunk_idx in range(chunks_needed):
         rules_in_chunk = min(chunk_size, total_rules - len(all_rules))
         if rules_in_chunk <= 0:
             break
 
+        # Update prompt for this chunk size
         chunk_prompt = prompt.replace(f"{total_rules} NEW", f"{rules_in_chunk} NEW")
         chunk_prompt = chunk_prompt.replace("{{num_of_rules}}", str(rules_in_chunk))
-        prompts.append(chunk_prompt)
 
-    # Batch process all chunk prompts at once
-    responses = client.chat.completions.batch(
-        model=model,
-        messages=[[{"role": "system", "content": p}] for p in prompts],
-        response_model=list[FormulaItem],
-        max_retries=max_retries,
-        temperature=temperature,
-        top_p=0.9,
-        frequency_penalty=0.5,
-        presence_penalty=0.3
-    )
+        try:
+            chunk_rules = get_rules_single_chunk(
+                chunk_prompt, valid_market_ids, client, rules_in_chunk,
+                model, temperature, max_retries
+            )
+            all_rules.extend(chunk_rules)
 
-    # Flatten the nested results
-    for chunk in responses:
-        all_rules.extend(chunk)
-
+        except Exception as e:
+            raise RuntimeError("Failed to extract rules") from e
     return all_rules
 
 
 def get_rules_single_chunk(
     prompt: str,
-    valid_market_ids: set[str], 
+    valid_market_ids: set[str],
     client: instructor.Instructor,
     num_rules: int,
     model: str = DEFAULT_MODEL,
@@ -256,7 +248,7 @@ def get_rules_single_chunk(
 
 
 def get_rules(
-    prompt: str, 
+    prompt: str,
     valid_market_ids: set[str],
     client: instructor.Instructor,
     model: str = DEFAULT_MODEL,
@@ -276,7 +268,7 @@ def get_rules(
 
     Returns:
         A list of FormulaItems.
-        
+
     Raises:
         Exception: If rule generation fails after all retries.
 
@@ -284,7 +276,7 @@ def get_rules(
     # Extract number of rules from prompt
     num_match = re.search(r'(\d+) NEW', prompt)
     total_rules = int(num_match.group(1)) if num_match else 30
-    
+
     # Use chunked generation for large batches
     if total_rules > 15:
         return get_rules_chunked(
@@ -351,28 +343,24 @@ def get_weight(prompt: str, market_text_representation: str,
         A float average score for ten responses.
 
     """
-    messages = [
-        [
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": market_text_representation}
-        ]
-        for _ in range(5)
-    ]
+    scores = []
+    reasonings = []
+    for _ in range(5):
+        response = client.chat.completions.create(
+            model="gpt-4.1",
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": market_text_representation}
+            ],
+            response_model=WeightScore,
+            max_retries=3,
+            temperature=0.3
+        )
+        scores.append(response.weight_score)
+        reasonings.append(response.reasoning)
 
-    # batch the structured calls in memory
-    responses = client.chat.completions.batch(
-        model="gpt-4.1",
-        messages=messages,
-        response_model=WeightScore,
-        max_retries=3,
-        temperature=0.3,
-    )
-
-    # Extract results
-    scores = [r.weight_score for r in responses]
-    reasonings = [r.reasoning for r in responses]
+    # Calculate average score
     average_score = sum(scores) / len(scores)
-
     return reasonings, scores, average_score
 
 

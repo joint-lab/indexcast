@@ -590,9 +590,7 @@ def relevance_summary_statistics(context: dg.AssetExecutionContext) -> dg.Materi
     context.log.info(f"Found {len(market_ids)} labeled markets.")
 
     # Load all score‐type rows once and build a name id map
-    with Session(context.resources.database_engine) as session:
-        score_type_rows = session.exec(select(MarketRelevanceScoreType)).all()
-    score_type_map = { row.score_name: row.id for row in score_type_rows }
+    score_type_map = {s.relevance_score: s.value for s in MarketRelevanceScoreType}
     context.log.info(f"Found {len(score_type_map)} relevance label types.")
 
     with locked_session(context.resources.database_engine) as session:
@@ -694,12 +692,7 @@ def relevance_temporal(context: dg.AssetExecutionContext) -> dg.MaterializeResul
                 MarketLabel.label_type_id == h5n1_result.id
             )
         ).all()
-        label_for_temp = session.exec(
-            select(MarketRelevanceScoreType.id).where(
-                MarketRelevanceScoreType.score_name == "temporal_relevance"
-            )
-        ).first()
-
+        label_for_temp = MarketRelevanceScoreType.TEMPORAL_RELEVANCE.value
     context.log.info(f"Found {len(market_ids)} labeled markets.")
 
     scores_to_add = []
@@ -794,11 +787,8 @@ def relevance_geographical(context: dg.AssetExecutionContext) -> dg.MaterializeR
                 MarketLabel.label_type_id == h5n1_result.id
             )
         ).all()
-        label_for_geo = session.exec(
-            select(MarketRelevanceScoreType.id).where(
-                MarketRelevanceScoreType.score_name == "geographical_relevance"
-            )
-        ).first()
+        label_for_geo = MarketRelevanceScoreType.GEOGRAPHICAL_RELEVANCE.value
+
 
     context.log.info(f"Found {len(market_ids)} labeled markets.")
 
@@ -895,11 +885,7 @@ def relevance_index_question(context: dg.AssetExecutionContext) -> dg.Materializ
                 MarketLabel.label_type_id == h5n1_result.id
             )
         ).all()
-        label_for_index = session.exec(
-            select(MarketRelevanceScoreType.id).where(
-                MarketRelevanceScoreType.score_name == "index_question_relevance"
-            )
-        ).first()
+        label_for_index = MarketRelevanceScoreType.INDEX_QUESTION_RELEVANCE.value
 
     context.log.info(f"Found {len(market_ids)} labeled markets.")
 
@@ -1009,20 +995,17 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
             f"Found {num_markets_processed} h5n1 markets needing eligibility classification."
         )
 
+        # Map score type names to their enum IDs directly (no DB query needed)
         score_type_ids = {}
         score_names = ["temporal_relevance", "geographical_relevance",
                        "index_question_relevance", "volume_total"]
 
         for score_name in score_names:
-            result = session.exec(
-                select(MarketRelevanceScoreType)
-                .where(MarketRelevanceScoreType.score_name == score_name)
-            ).first()
-
-            if result:
-                score_type_ids[score_name] = result.id
-            else:
-                context.log.warning(f"Missing score type for {score_name}")
+            try:
+                score_type = MarketRelevanceScoreType.from_string(score_name)
+                score_type_ids[score_name] = score_type.value  # .value gives the int ID
+            except ValueError:
+                context.log.warning(f"Invalid score type name: {score_name}")
 
     temporal_score_type_id = score_type_ids["temporal_relevance"]
     geo_score_type_id = score_type_ids["geographical_relevance"]
@@ -1064,27 +1047,25 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
         with Session(context.resources.database_engine) as session:
             existing_event = session.exec(
                 select(MarketPipelineEvent).where(
-                    (MarketPipelineEvent.market_id == m.id) &
-                    (MarketPipelineEvent.stage_id == PipelineStageType.RULE_ELIGIBILITY)
+                    (MarketPipelineEvent.market_id == m.id)
+                    & (MarketPipelineEvent.stage_id == PipelineStageType.RULE_ELIGIBILITY)
                 )
             ).first()
 
             if not existing_event:
-                session.add(
-                    MarketPipelineEvent(
-                        market_id=m.id,
-                        stage_id=PipelineStageType.RULE_ELIGIBILITY,
-                        completed_at=datetime.now(UTC)
-                    )
-                )
+                session.add(MarketPipelineEvent(
+                    market_id=m.id,
+                    stage_id=PipelineStageType.RULE_ELIGIBILITY,
+                    completed_at=datetime.now(UTC),
+                ))
                 session.commit()
 
+    for m in markets_to_process:
         temp_score = score_lookup.get((m.id, temporal_score_type_id))
         geo_score = score_lookup.get((m.id, geo_score_type_id))
         question_score = score_lookup.get((m.id, question_score_type_id))
         volume_score = score_lookup.get((m.id, volume_score_type_id))
 
-        # Check binary and volume threshold first
         if m.outcome_type != "BINARY":
             context.log.info(f"Market {m.id} is NOT BINARY; marking as not eligible.")
             classification_results.append((m.id, False))
@@ -1100,12 +1081,10 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
             classification_results.append((m.id, False))
             continue
 
-        # Skip if relevance scores are missing
         if None in (temp_score, geo_score, question_score):
             context.log.warning(f"Missing score(s) for market {m.id}; skipping classification.")
             num_skipped += 1
             continue
-
 
         prediction = eligibility_classifier.predict(temp_score, geo_score, question_score)
         classification_results.append((m.id, prediction))
@@ -1143,7 +1122,6 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
             "num_markets_skipped": dg.MetadataValue.int(num_skipped),
         }
     )
-
 
 @dg.asset(
     deps=[market_rule_eligibility_labels],

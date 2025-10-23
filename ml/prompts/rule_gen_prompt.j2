@@ -17,7 +17,7 @@ Use this internal definition consistently when determining which Boolean conditi
    - Use 1-3 distinct market IDs per rule
    - Maximum nesting depth of 2
    - AND/OR nodes must have exactly 2-3 children
-   - Single literals are allowed
+   - Leaf nodes must always be "variable" with a "var" key equal to one of the available market IDs.
 4. **Uniqueness**: Avoid rules functionally equivalent to existing ones
 5. **Logical Guarantee**: Each rule must define a condition such that if it is true, then the target event described by "{{overall_index_question}}" would logically follow — independent of other variables.
 
@@ -32,24 +32,41 @@ Use ONLY these market IDs as variable names in your rules:
 ---
 {% endfor %}
 
-Return JSON only—no prose—matching **exactly**:
+## OUTPUT FORMAT
+
+Return a JSON array of rules only. Each rule must include all three required fields:
+
+- "reasoning": a string explaining why this rule alone is sufficient for the target event
+- "verbalization": a human-readable string describing this rule
+- "rule": the Boolean logic rule in JSON format
+
+**Each rule must follow exactly this structure:**
+
 {
-  "reasoning": "...",
-  "verbalization": "...",
+  "reasoning": "<explain why this rule alone is sufficient>",
+  "verbalization": "<human-readable statement of this rule>",
   "rule": {
-    "node_type": "...",
-    "arguments": [ ... ]
+    "node_type": "<must be one of 'variable', 'not', 'and', 'or'>",
+    "arguments": [ ... ]  // required only if node_type is not "variable"
   }
 }
 
-Allowed node structures inside the "rule" field:
-- Variables:
-  {"node_type": "variable", "var": "market-id"}
+Allowed node structures:
+
+- Variable (leaf):
+  {"node_type": "variable", "var": "<market_id>"}
 - NOT:
   {"node_type": "not", "arguments": [ <one rule> ]}
 - AND / OR:
   {"node_type": "and" | "or", "arguments": [ <2 or 3 rules> ]}
 
-Use only these node types and structure. Each rule must follow the Boolean constraints and use only the provided market IDs.
+IMPORTANT:
 
-Generate {{num_of_rules}} unique, valid rules now:
+- node_type must be exactly "variable", "not", "and", or "or". No other values.
+- Arguments array is required for "not", "and", "or". Do NOT include arguments for "variable".
+- Do NOT include extra spaces in key names. Keys must match exactly: "node_type", "arguments", "var".
+- All fields are required: reasoning, verbalization, rule.
+- Return valid JSON only—do not add extra commas, trailing commas, or text outside the JSON array.
+- Provide only the JSON array. Do NOT include prose or explanations outside the array.
+
+Generate {{num_of_rules}} unique, valid rules now.
