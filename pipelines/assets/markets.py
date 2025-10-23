@@ -733,10 +733,10 @@ def relevance_temporal(context: dg.AssetExecutionContext) -> dg.MaterializeResul
         context.log.info(f"Temporal relevance computed for market: {market_id}.")
 
     with locked_session(context.resources.database_engine) as session:
-        for _m in market_ids_to_delete:
+        for m in market_ids_to_delete:
             existing_event = session.exec(
                 select(MarketPipelineEvent).where(
-                    (MarketPipelineEvent.market_id == market_id) &
+                    (MarketPipelineEvent.market_id == m) &
                     (MarketPipelineEvent.stage_id == PipelineStageType.TEMP_RELEVANCE_SCORED)
                 )
             ).first()
@@ -744,7 +744,7 @@ def relevance_temporal(context: dg.AssetExecutionContext) -> dg.MaterializeResul
             if not existing_event:
                 session.add(
                     MarketPipelineEvent(
-                        market_id=market_id,
+                        market_id=m,
                         stage_id=PipelineStageType.TEMP_RELEVANCE_SCORED,
                         completed_at=datetime.now(UTC)
                     )
@@ -831,10 +831,10 @@ def relevance_geographical(context: dg.AssetExecutionContext) -> dg.MaterializeR
         context.log.info(f"Geographical relevance computed for market: {market_id}.")
 
     with locked_session(context.resources.database_engine) as session:
-        for _m in market_ids_to_delete:
+        for m in market_ids_to_delete:
             existing_event = session.exec(
                 select(MarketPipelineEvent).where(
-                    (MarketPipelineEvent.market_id == market_id) &
+                    (MarketPipelineEvent.market_id == m) &
                     (MarketPipelineEvent.stage_id == PipelineStageType.GEO_RELEVANCE_SCORED)
                 )
             ).first()
@@ -842,7 +842,7 @@ def relevance_geographical(context: dg.AssetExecutionContext) -> dg.MaterializeR
             if not existing_event:
                 session.add(
                     MarketPipelineEvent(
-                        market_id=market_id,
+                        market_id=m,
                         stage_id=PipelineStageType.GEO_RELEVANCE_SCORED,
                         completed_at=datetime.now(UTC)
                     )
@@ -928,10 +928,10 @@ def relevance_index_question(context: dg.AssetExecutionContext) -> dg.Materializ
 
 
     with locked_session(context.resources.database_engine) as session:
-        for _m in market_ids_to_delete:
+        for m in market_ids_to_delete:
             existing_event = session.exec(
                 select(MarketPipelineEvent).where(
-                    (MarketPipelineEvent.market_id == market_id) &
+                    (MarketPipelineEvent.market_id == m) &
                     (MarketPipelineEvent.stage_id ==
                      PipelineStageType.INDEX_QUESTION_RELEVANCE_SCORED)
                 )
@@ -940,7 +940,7 @@ def relevance_index_question(context: dg.AssetExecutionContext) -> dg.Materializ
             if not existing_event:
                 session.add(
                     MarketPipelineEvent(
-                        market_id=market_id,
+                        market_id=m,
                         stage_id=PipelineStageType.INDEX_QUESTION_RELEVANCE_SCORED,
                         completed_at=datetime.now(UTC)
                     )
