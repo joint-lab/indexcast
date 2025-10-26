@@ -1227,7 +1227,7 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
                 # Organize scores by type
                 scores_dict = {}
                 for score in market_scores:
-                    score_type_name = score.score_type.score_name
+                    score_type_name = score.score_type.relevance_score
                     scores_dict[score_type_name] = score.score_value
                 
                 market_metrics[market_id] = scores_dict

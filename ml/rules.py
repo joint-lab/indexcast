@@ -9,11 +9,11 @@ Authors:
 import re
 from datetime import datetime
 from os import path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Union
 
 import instructor
 from jinja2 import Environment, FileSystemLoader
-from pydantic import AliasChoices, BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # Constants for rule validation
 MAX_RULE_DEPTH = 2
@@ -25,107 +25,237 @@ DEFAULT_TEMPERATURE = 0.8
 DEFAULT_MAX_RETRIES = 3
 
 
-# ── Boolean‑AST schema ───────────────────────────────────────────────
-
+# ── Variable node ──────────────────────────────────────────────────
 class Var(BaseModel):
-    """
-    Represents a variable node in a Boolean formula AST (Abstract Syntax Tree).
+    """Represents a variable in the formula."""
+    node_type: Literal["variable", "var"] = Field(default="variable")
+    var: str = Field(description="Variable name")
 
-    Attributes:
-        node_type (Literal["variable"]): Must always be the string
-                                        'variable'. Used for type discrimination.
-        variable_name (str): The name of the variable, provided under the alias 'var'.
+    @property
+    def variable_name(self) -> str:
+        """Backward compatibility property."""
+        return self.var
 
-    """
+    @model_validator(mode='after')
+    def normalize_node_type(self):
+        """Ensure node_type is always 'variable' after validation."""
+        self.node_type = "variable"
+        return self
 
-    node_type: Literal["variable"] = Field(description="Must be exactly 'variable'")
-    variable_name: str = Field(alias="var", description="Variable name")
-
-    model_config = dict(populate_by_name=True, extra="forbid")
+    model_config = dict(populate_by_name=True, extra="ignore")
 
 
+# ── Operator node ──────────────────────────────────────────────────
 class Op(BaseModel):
-    """
-    Represents an operator node in a Boolean formula AST.
+    """Represents a logical operator with child formulas."""
+    node_type: Literal["and", "or", "not", "xor", "nand", "nor", "common"]
+    arguments: list['Formula'] = Field(min_length=1)
 
-    Attributes:
-        node_type (Literal["and", "or", "not", "xor", "nand", "nor"]):
-            The Boolean operator represented by this node.
-        arguments (list[Formula]):
-            The operands or sub-formulas for this operation.
-            Accepts keys like 'arguments', 'args', 'children', or the singular 'child'.
-
-    Validators:
-        coerce_single: Ensures that a single 'child' provided as a dict is wrapped in a list.
-        arity_ok: Validates the correct number of child formulas based on the operator type.
-
-    """
-
-    node_type: Literal["and", "or", "not", "xor", "nand", "nor"]
-    # accept many synonyms AND the sloppy `"child": {...}` form
-    arguments: list["Formula"] = Field(
-        validation_alias=AliasChoices("arguments", "args", "children", "child"),
-        description="Sub‑formulas of this operation",
-    )
-
-    @field_validator("arguments", mode="before")
+    @model_validator(mode='before')
     @classmethod
-    def coerce_single(cls, v):
-        """
-        Wrap a single 'child' dict in a list to standardize the 'arguments' format.
+    def normalize_before(cls, data):
+        """Normalize node_type and arguments before validation."""
+        if isinstance(data, dict):
+            # Normalize node_type aliases
+            if 'node_type' in data:
+                nt = str(data['node_type']).strip().lower()
+                if nt == 'common':
+                    data['node_type'] = 'and'
+                else:
+                    data['node_type'] = nt
 
-        Allows sloppy single-child input.
-        """
-        # allow `"child": { … }` by wrapping it in a list
-        return [v] if isinstance(v, dict) else v
+            # Handle arguments normalization
+            if 'arguments' in data:
+                args = data['arguments']
+
+                # If arguments is not a list, wrap it
+                if not isinstance(args, list):
+                    data['arguments'] = [args]
+                else:
+                    # Flatten if it's a list containing a single list
+                    if len(args) == 1 and isinstance(args[0], list):
+                        data['arguments'] = args[0]
+
+        return data
 
     @field_validator("arguments")
     @classmethod
-    def arity_ok(cls, v, info):
-        """
-        Validate that.
-
-            - 'not' has exactly one argument.
-            - All other operators have at least two arguments.
-
-        Raises:
-            ValueError if the arity is invalid.
-
-        """
-        op = info.data["node_type"]
+    def check_arity(cls, v, info):
+        """Validate operator arity rules."""
+        op = info.data.get("node_type")
         if op == "not" and len(v) != 1:
-            raise ValueError("NOT needs exactly one child")
-        if op != "not" and len(v) < 2:
-            raise ValueError(f"{op.upper()} needs ≥2 children")
+            raise ValueError(f"NOT requires exactly one child, got {len(v)}")
+        if op in ["and", "or", "xor", "nand", "nor", "common"] and len(v) < 2:
+            raise ValueError(f"{op.upper()} requires at least 2 children, got {len(v)}")
         return v
 
-    model_config = dict(populate_by_name=True, extra="forbid")
+    model_config = dict(extra="ignore")
 
 
-type Formula = Annotated[Var | Op, Field(discriminator="node_type")]
+# ── Unknown fallback ───────────────────────────────────────────────
+class Unknown(BaseModel):
+    """Fallback for unrecognized formula structures."""
+    node_type: Literal["unknown"] = "unknown"
+    content: dict = Field(default_factory=dict)
+
+    model_config = dict(extra="ignore")
+
+
+# ── Discriminated union ────────────────────────────────────────────
+Formula = Annotated[
+    Union[Var, Op, Unknown],
+    Field(discriminator="node_type"),
+]
+
+# Rebuild Op model to resolve ForwardRef
 Op.model_rebuild()
 
 
-# ── response schema ──────────────────────────────────────────────────
+# ── Helper function for cleaning dict keys ────────────────────────
+def clean_dict_keys(d):
+    """Recursively clean dictionary keys by stripping whitespace."""
+    if not isinstance(d, dict):
+        return d
 
+    cleaned = {}
+    for k, v in d.items():
+        clean_key = k.strip() if isinstance(k, str) else k
+        if isinstance(v, dict):
+            cleaned[clean_key] = clean_dict_keys(v)
+        elif isinstance(v, list):
+            cleaned[clean_key] = [clean_dict_keys(item) if isinstance(item, dict) else item for item in v]
+        else:
+            cleaned[clean_key] = v
+
+    return cleaned
+
+
+# ── Wrapper with top-level normalization ───────────────────────────
 class FormulaItem(BaseModel):
-    """
-    Represent a single item in a response that explains a Boolean formula.
-
-    Attributes:
-        reasoning (str):
-            A textual explanation of the logical structure or intent behind the formula.
-        verbalization (str):
-            A natural language version or paraphrase of the formula.
-        rule (Formula):
-            The actual Boolean formula (AST structure) being described.
-
-    """
-
+    """Top-level wrapper for a formula with reasoning and verbalization."""
     reasoning: str
     verbalization: str
     rule: Formula
 
+    @model_validator(mode='before')
+    @classmethod
+    def normalize_and_validate(cls, data):
+        """Clean keys and validate structure before processing."""
+        if not isinstance(data, dict):
+            return data
+
+        # Clean all keys recursively first
+        data = clean_dict_keys(data)
+
+        # CRITICAL: Check if rule is empty/invalid before proceeding
+        if 'rule' in data:
+            rule = data['rule']
+
+            # If rule is empty string, None, or empty dict, skip this item
+            if not rule or rule == "" or (isinstance(rule, dict) and not rule):
+                raise ValueError("Rule field is empty or invalid")
+
+            # If rule is a dict, normalize it
+            if isinstance(rule, dict):
+                data['rule'] = cls._normalize_formula_dict(rule)
+
+        # Validate required fields are not empty
+        if not data.get('reasoning', '').strip():
+            raise ValueError("Reasoning field is empty")
+        if not data.get('verbalization', '').strip():
+            raise ValueError("Verbalization field is empty")
+
+        return data
+
+    @staticmethod
+    def _normalize_formula_dict(d: dict) -> dict:
+        """Recursively normalize a formula dictionary."""
+        if not isinstance(d, dict):
+            return d
+
+        # Strip whitespace from all keys first
+        normalized = {k.strip().lower(): v for k, v in d.items()}
+
+        # Handle node_type variations
+        if 'nodetype' in normalized:
+            normalized['node_type'] = normalized.pop('nodetype')
+
+        if 'node_type' in normalized:
+            nt = str(normalized['node_type']).strip().lower()
+            # Map common aliases
+            alias_map = {
+                'var': 'variable',
+                'variable': 'variable',
+                'common': 'and',
+            }
+            normalized['node_type'] = alias_map.get(nt, nt)
+
+        # Handle variable name aliases
+        if normalized.get('node_type') in ['variable', 'var']:
+            if 'variable' in normalized and 'var' not in normalized:
+                normalized['var'] = normalized.pop('variable')
+            if 'variable_name' in normalized and 'var' not in normalized:
+                normalized['var'] = normalized.pop('variable_name')
+
+        # Recursively normalize arguments with double-nesting fix
+        if 'arguments' in normalized:
+            args = normalized['arguments']
+            if isinstance(args, list):
+                # Check for double-nesting [[...]]
+                if len(args) == 1 and isinstance(args[0], list):
+                    args = args[0]
+
+                normalized['arguments'] = [
+                    FormulaItem._normalize_formula_dict(arg) if isinstance(arg, dict) else arg
+                    for arg in args
+                ]
+            elif isinstance(args, dict):
+                normalized['arguments'] = [FormulaItem._normalize_formula_dict(args)]
+
+        # Fallback to unknown if no valid node_type
+        if 'node_type' not in normalized or normalized['node_type'] not in [
+            'variable', 'var', 'and', 'or', 'not', 'xor', 'nand', 'nor', 'common', 'unknown'
+        ]:
+            return {
+                'node_type': 'unknown',
+                'content': d  # Preserve original
+            }
+
+        return normalized
+
+
+# ── Response wrapper that filters out invalid items ────────────────
+class Response(BaseModel):
+    """Response containing a list of formula items."""
+    content: list[FormulaItem]
+
+    @model_validator(mode='before')
+    @classmethod
+    def filter_invalid_items(cls, data):
+        """Filter out invalid items before validation."""
+        if isinstance(data, dict) and 'content' in data:
+            if isinstance(data['content'], list):
+                # Filter out items with validation errors
+                valid_items = []
+                for item in data['content']:
+                    try:
+                        # Quick check for empty/invalid items
+                        if not isinstance(item, dict):
+                            continue
+                        if not item.get('reasoning', '').strip():
+                            continue
+                        if not item.get('verbalization', '').strip():
+                            continue
+                        if not item.get('rule') or item.get('rule') == '':
+                            continue
+                        valid_items.append(item)
+                    except Exception:
+                        # Skip items that fail basic validation
+                        continue
+
+                data['content'] = valid_items
+
+        return data
 
 # --- Data Model for Prompt Input ---
 class PromptInformation(BaseModel):
@@ -236,7 +366,7 @@ def get_rules_single_chunk(
     response = client.chat.completions.create(
         model=model,
         messages=[{"role": "system", "content": prompt}],
-        response_model=list[FormulaItem],
+        response_model=Response,
         max_retries=1,
         temperature=temperature,
         top_p=0.9,
@@ -244,7 +374,8 @@ def get_rules_single_chunk(
         presence_penalty=0.3
     )
 
-    return response
+    # Return the filtered content list
+    return response.content
 
 
 def get_rules(
@@ -373,7 +504,7 @@ def stringify_formula(formula: Formula, session) -> str:
         from models.markets import Market
         
         market = session.exec(
-            select(Market).where(Market.id == formula.variable_name.strip('"').strip("'"))
+            select(Market).where(Market.id == formula.var.strip('"').strip("'"))
         ).first()
         
         return market.question if market else f"[Unknown: {formula.variable_name}]"
@@ -405,7 +536,7 @@ def extract_literals_from_formula(formula: Formula) -> list[str]:
     def traverse(node: Formula):
         if node.node_type == "variable":
             # Strip leading/trailing quotes (single or double)
-            cleaned_name = node.variable_name.strip('"').strip("'")
+            cleaned_name = node.var.strip('"').strip("'")
             literals.append(cleaned_name)
         elif hasattr(node, "arguments"):
             for child in node.arguments:
