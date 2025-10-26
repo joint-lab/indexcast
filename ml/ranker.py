@@ -6,7 +6,6 @@ Authors:
 - Erik Arnold <ewarnold@uvm.edu>
 """
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from os import path
 
@@ -58,40 +57,32 @@ def get_relevance(prompt: str, market_text_representation: str,
     """
     Rank the relevance of a market description to a given prompt.
 
-    Uses in-memory parallel batching.
-    """
-    messages_list = [
-        [
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": market_text_representation},
-        ]
-        for _ in range(10)
-    ]
+    Args:
+        prompt: The system-level instruction or prompt for ranking.
+        market_text_representation: A text representation of the market.
+        client: An Instructor-enhanced OpenAI client.
 
-    def call_model(messages):
-        # One API call per message set
-        return client.chat.completions.create(
+    Returns:
+        A float average score for ten responses.
+        The list of reasonings
+        the list of scores
+
+    """
+    reasonings = []
+    scores = []
+    for _ in range(10):
+        response = client.chat.completions.create(
             model="gpt-4.1-mini",
-            messages=messages,
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": market_text_representation}
+            ],
             response_model=MarketRelevance,
             max_retries=3,
-            temperature=0.3,
+            temperature=0.3
         )
-
-    responses = []
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {executor.submit(call_model, m): m for m in messages_list}
-        for future in as_completed(futures):
-            responses.append(future.result())
-
-    # Compute final aggregates
-    if not responses:
-        raise RuntimeError("No successful responses from relevance model")
-
-    scores = [r.relevance_score for r in responses]
-    reasonings = [r.reasoning for r in responses]
+        scores.append(response.relevance_score)
+        reasonings.append(response.reasoning)
+    # Calculate average score
     average_score = sum(scores) / len(scores)
-
     return reasonings, scores, average_score
-
-
