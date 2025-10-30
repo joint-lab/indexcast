@@ -377,3 +377,22 @@ class Index(SQLModel, table=True):
     )
 
 
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Index relevance prompt
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+class RelevancePrompt(SQLModel, table=True):
+    """Meta-generated relevance evaluation prompt for a specific market label/index question."""
+
+    __tablename__ = "relevance_prompts"
+
+    id: int = Field(primary_key=True)
+    prompt: str = Field(description="The meta-generated relevance evaluation prompt")
+
+    # Link to the market label / index question this prompt is for
+    label_type_id: int = Field(foreign_key="market_label_types.id",
+                               description="Market label or index this prompt is associated with")
+    label_type: MarketLabelType = Relationship(back_populates="relevance_prompts")
+
+    index_question: str = Field(description="The index question used to generate this prompt")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
