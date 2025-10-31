@@ -23,6 +23,7 @@ class MarketRelevance(BaseModel):
 
 class IndexInformation(BaseModel):
     """Structured model for Disease information."""
+
     todays_date: datetime = Field(description="The date for the index val.")
     overall_index_question: str = Field(description="Overall index question.")
 

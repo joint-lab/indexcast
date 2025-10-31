@@ -9,7 +9,7 @@ Authors:
 import re
 from datetime import datetime
 from os import path
-from typing import Annotated, Literal, Union
+from typing import Annotated, Literal
 
 import instructor
 from jinja2 import Environment, FileSystemLoader
@@ -28,6 +28,7 @@ DEFAULT_MAX_RETRIES = 3
 # ── Variable node ──────────────────────────────────────────────────
 class Var(BaseModel):
     """Represents a variable in the formula."""
+
     node_type: Literal["variable", "var"] = Field(default="variable")
     var: str = Field(description="Variable name")
 
@@ -48,6 +49,7 @@ class Var(BaseModel):
 # ── Operator node ──────────────────────────────────────────────────
 class Op(BaseModel):
     """Represents a logical operator with child formulas."""
+
     node_type: Literal["and", "or", "not", "xor", "nand", "nor", "common"]
     arguments: list['Formula'] = Field(min_length=1)
 
@@ -95,6 +97,7 @@ class Op(BaseModel):
 # ── Unknown fallback ───────────────────────────────────────────────
 class Unknown(BaseModel):
     """Fallback for unrecognized formula structures."""
+
     node_type: Literal["unknown"] = "unknown"
     content: dict = Field(default_factory=dict)
 
@@ -103,7 +106,7 @@ class Unknown(BaseModel):
 
 # ── Discriminated union ────────────────────────────────────────────
 Formula = Annotated[
-    Union[Var, Op, Unknown],
+    Var | Op | Unknown,
     Field(discriminator="node_type"),
 ]
 
@@ -123,7 +126,10 @@ def clean_dict_keys(d):
         if isinstance(v, dict):
             cleaned[clean_key] = clean_dict_keys(v)
         elif isinstance(v, list):
-            cleaned[clean_key] = [clean_dict_keys(item) if isinstance(item, dict) else item for item in v]
+            cleaned[clean_key] = [
+                clean_dict_keys(item) if isinstance(item, dict) else item
+                for item in v
+            ]
         else:
             cleaned[clean_key] = v
 
@@ -133,6 +139,7 @@ def clean_dict_keys(d):
 # ── Wrapper with top-level normalization ───────────────────────────
 class FormulaItem(BaseModel):
     """Top-level wrapper for a formula with reasoning and verbalization."""
+
     reasoning: str
     verbalization: str
     rule: Formula
@@ -227,6 +234,7 @@ class FormulaItem(BaseModel):
 # ── Response wrapper that filters out invalid items ────────────────
 class Response(BaseModel):
     """Response containing a list of formula items."""
+
     content: list[FormulaItem]
 
     @model_validator(mode='before')
@@ -260,6 +268,7 @@ class Response(BaseModel):
 # --- Data Model for Prompt Input ---
 class PromptInformation(BaseModel):
     """Structured model for Disease information."""
+
     date: datetime = Field(description="The date we are interested in.")
     overall_index_question: str = Field(description="Overall index question.")
     num_of_rules: int = Field(description="Number of rules to be generated.")

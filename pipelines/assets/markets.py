@@ -696,7 +696,8 @@ def relevance_prompts(context: dg.AssetExecutionContext) -> dg.MaterializeResult
         prompt_obj = get_or_create_relevance_prompt(
             session=session,
             label_type_id=label_type.id,
-            index_question="Will there be a large scale H5N1 outbreak in humans  in the next 12 months?",
+            index_question="Will there be a large scale "
+                           "H5N1 outbreak in humans  in the next 12 months?",
             current_date=datetime.now(UTC),
             client=client,
             force_regenerate=False,
@@ -738,7 +739,6 @@ def relevance_score(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     it generates relevance scores using the meta-generated prompts
     stored in the RelevancePrompt table.
     """
-
     client = get_client()
     
     # Get list of market ids that have been labeled
@@ -756,11 +756,13 @@ def relevance_score(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
             select(RelevancePrompt)
             .where(
                 RelevancePrompt.label_type_id == h5n1_result.id,
-                RelevancePrompt.index_question == "Will there be a large scale H5N1 outbreak in humans  in the next 12 months?"
+                RelevancePrompt.index_question == "Will there be a large scale "
+                                                  "H5N1 outbreak in humans  in the next 12 months?"
             )
             .order_by(RelevancePrompt.created_at.desc())
         ).first()
-        index_question = "Will there be a large scale H5N1 outbreak in humans  in the next 12 months?"
+        index_question = ("Will there be a large scale H5N1 "
+                          "outbreak in humans  in the next 12 months?")
         if not relevance_prompt_obj:
             context.log.error(
                 f"No relevance prompt found for label '{h5n1_result.label_name}' "
@@ -823,7 +825,8 @@ def relevance_score(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
             existing_event = session.exec(
                 select(MarketPipelineEvent).where(
                     (MarketPipelineEvent.market_id == m) &
-                    (MarketPipelineEvent.stage_id == PipelineStageType.INDEX_QUESTION_RELEVANCE_SCORED)
+                    (MarketPipelineEvent.stage_id ==
+                     PipelineStageType.INDEX_QUESTION_RELEVANCE_SCORED)
                 )
             ).first()
             
@@ -955,7 +958,8 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
             continue
 
         if question_score is None:
-            context.log.warning(f"Missing relevance score for market {m.id}; skipping classification.")
+            context.log.warning(f"Missing relevance score for market {m.id}; "
+                                f"skipping classification.")
             num_skipped += 1
             continue
 
@@ -1043,7 +1047,8 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
                 "description": market.description or "",
                 "text_rep": market.text_rep
             }
-        index_question = "Will there be a large scale H5N1 outbreak in humans  in the next 12 months?"
+        index_question = ("Will there be a large scale H5N1 outbreak in humans in "
+                          "the next 12 months?")
         # Prepare prompt with proper context from config
         prompt_data = PromptInformation(
             date=datetime.now(UTC),
