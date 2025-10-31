@@ -21,7 +21,8 @@ from sqlmodel import Session, select
 
 from ml.classification import H5N1Classifier, RuleEligibilityClassifier
 from ml.clients import get_client
-from ml.ranker import DiseaseInformation, get_prompt, get_relevance
+from ml.meta_prompting import get_or_create_relevance_prompt
+from ml.ranker import IndexInformation, get_prompt, get_relevance
 from ml.rules import (
     Formula,
     Op,
@@ -47,6 +48,7 @@ from models.markets import (
     MarketRule,
     MarketRuleLink,
     PipelineStageType,
+    RelevancePrompt,
 )
 from pipelines.resources.db import locked_session
 
@@ -672,107 +674,179 @@ def relevance_summary_statistics(context: dg.AssetExecutionContext) -> dg.Materi
 @dg.asset(
     deps=[manifold_full_markets],
     required_resource_keys={"database_engine"},
-    description="Temporal relevance scores for the labeled markets.",
+    description="Generate meta-prompts for all label types.",
 )
-def meta_prompts(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
+def relevance_prompts(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
+    """
+    Generate task-specific relevance prompts using meta-prompting.
+    
+    This asset generates optimized relevance evaluation prompts for each
+    market label type using the meta-prompt template.
+    """
+    client = get_client()
+    
+    with Session(context.resources.database_engine) as session:
+        # Get all label types that need prompts
+        label_types = session.exec(select(MarketLabelType)).all()
+        label_type = session.exec(select(MarketLabelType)).first()
+        prompts_created = 0
+        prompts_existing = 0
+        
+        ### HARD CODING FOR H5N1, WILL NEED TO BE REWORKED
+        prompt_obj = get_or_create_relevance_prompt(
+            session=session,
+            label_type_id=label_type.id,
+            index_question="Will there be a large scale H5N1 outbreak in humans  in the next 12 months?",
+            current_date=datetime.now(UTC),
+            client=client,
+            force_regenerate=False,
+        )
 
+        if prompt_obj.created_at >= datetime.now(UTC) - timedelta(seconds=10):
+            prompts_created += 1
+            context.log.info(
+                f"Generated new prompt for label '{label_type.label_name}'"
+            )
+        else:
+            prompts_existing += 1
+            context.log.info(
+                f"Using existing prompt for label '{label_type.label_name}'"
+            )
+        
+        session.commit()
+    
     return dg.MaterializeResult(
-        metadata={"num prompts generated": dg.MetadataValue.int(len(prompts))}
+        metadata={
+            "num_prompts_generated": dg.MetadataValue.int(prompts_created),
+            "num_prompts_existing": dg.MetadataValue.int(prompts_existing),
+            "total_label_types": dg.MetadataValue.int(len(label_types)),
+        }
     )
 
 
 
 @dg.asset(
-    deps=[meta_prompts],
+    deps=[relevance_prompts],
     required_resource_keys={"database_engine"},
-    description="Temporal relevance scores for the labeled markets.",
+    description="Unified relevance scores using meta-generated prompts.",
 )
 def relevance_score(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     """
-    Use client.py prompting to populate relevance scores.
+    Use meta-generated prompts to populate unified relevance scores.
 
     This asset looks at the labels table and for all labeled markets,
-    it generates relevance scores to the index question the market is
-    classified with and stores them in the database.
+    it generates relevance scores using the meta-generated prompts
+    stored in the RelevancePrompt table.
     """
-    # get list of market ids that have been labeled
+
+    client = get_client()
+    
+    # Get list of market ids that have been labeled
     with Session(context.resources.database_engine) as session:
         h5n1_result = session.exec(
             select(MarketLabelType).where(MarketLabelType.label_name == "h5n1")
         ).first()
+        
+        if not h5n1_result:
+            context.log.warning("No h5n1 label type found.")
+            return dg.MaterializeResult(metadata={})
+        
+        # Get the meta-generated prompt for this label type
+        relevance_prompt_obj = session.exec(
+            select(RelevancePrompt)
+            .where(
+                RelevancePrompt.label_type_id == h5n1_result.id,
+                RelevancePrompt.index_question == "Will there be a large scale H5N1 outbreak in humans  in the next 12 months?"
+            )
+            .order_by(RelevancePrompt.created_at.desc())
+        ).first()
+        index_question = "Will there be a large scale H5N1 outbreak in humans  in the next 12 months?"
+        if not relevance_prompt_obj:
+            context.log.error(
+                f"No relevance prompt found for label '{h5n1_result.label_name}' "
+                f"and question '{index_question}'. Run meta_prompts asset first."
+            )
+            return dg.MaterializeResult(metadata={})
+        
+        meta_generated_prompt = relevance_prompt_obj.prompt
+        context.log.info(f"Using meta-generated prompt (ID: {relevance_prompt_obj.id})")
+        
         market_ids = session.exec(
             select(MarketLabel.market_id).where(
                 MarketLabel.label_type_id == h5n1_result.id
             )
         ).all()
-        label_for_temp = MarketRelevanceScoreType.TEMPORAL_RELEVANCE.value
+    
     context.log.info(f"Found {len(market_ids)} labeled markets.")
-
+    
+    # Use unified INDEX_QUESTION_RELEVANCE instead of separate temporal/geo scores
+    score_type_id = MarketRelevanceScoreType.INDEX_QUESTION_RELEVANCE.value
+    
     scores_to_add = []
     market_ids_to_delete = []
-
+    
     for market_id in market_ids:
         with Session(context.resources.database_engine) as session:
-            market_label = session.exec(
-                select(MarketLabel).where(MarketLabel.market_id == market_id)
-            ).first()
-            label_name = market_label.label_type.label_name
-
             market = session.exec(
                 select(Market).where(Market.id == market_id)
             ).first()
-
-        # use the disease information class from the ranker file for structured info
-        # for prompting
-        # Get the Market label name
-        todays_date = datetime.now(UTC)
-        disease_info = DiseaseInformation(
-            disease=label_name,
-            date=todays_date,
-            overall_index_question="Will there be a massive H5N1 outbreak in the next 12 months?"
+            
+            if not market or not market.text_rep:
+                context.log.warning(f"Market {market_id} missing text representation")
+                continue
+        
+        # Score using meta-generated prompt with Monte Carlo averaging
+        reasonings, scores, average_score = get_relevance(
+            meta_generated_prompt, 
+            market.text_rep, 
+            client,
+            n_runs=10
         )
-        prompt_temp = get_prompt("temporal_relevance_prompt.j2", disease_info)
-        client = get_client()
-        reasonings, scores, average_score = get_relevance(prompt_temp, market.text_rep, client)
+        
         # Collect for batch write
         scores_to_add.append(MarketRelevanceScore(
             market_id=market_id,
-            score_type_id=label_for_temp,
+            score_type_id=score_type_id,
             score_value=average_score,
             chain_of_thoughts=str(reasonings),
             scores=str(scores),
         ))
         market_ids_to_delete.append(market_id)
-        context.log.info(f"Temporal relevance computed for market: {market_id}.")
-
+        context.log.info(
+            f"Relevance scored for market {market_id}: {average_score:.3f}"
+        )
+    
+    # Batch write to database
     with locked_session(context.resources.database_engine) as session:
+        # Record pipeline events
         for m in market_ids_to_delete:
             existing_event = session.exec(
                 select(MarketPipelineEvent).where(
                     (MarketPipelineEvent.market_id == m) &
-                    (MarketPipelineEvent.stage_id == PipelineStageType.TEMP_RELEVANCE_SCORED)
+                    (MarketPipelineEvent.stage_id == PipelineStageType.INDEX_QUESTION_RELEVANCE_SCORED)
                 )
             ).first()
-
+            
             if not existing_event:
                 session.add(
                     MarketPipelineEvent(
                         market_id=m,
-                        stage_id=PipelineStageType.TEMP_RELEVANCE_SCORED,
+                        stage_id=PipelineStageType.INDEX_QUESTION_RELEVANCE_SCORED,
                         completed_at=datetime.now(UTC)
                     )
                 )
-
+        
+        # Delete old scores and insert new ones
         session.exec(
             delete(MarketRelevanceScore)
             .where(MarketRelevanceScore.market_id.in_(market_ids_to_delete))
-            .where(MarketRelevanceScore.score_type_id == label_for_temp)
+            .where(MarketRelevanceScore.score_type_id == score_type_id)
         )
         session.add_all(scores_to_add)
         session.commit()
-
-    context.log.info("All temporal relevance scores updated in DB.")
-
+    
+    context.log.info("All relevance scores updated in DB.")
+    
     return dg.MaterializeResult(
         metadata={"num_markets_processed": dg.MetadataValue.int(len(market_ids))}
     )
@@ -811,28 +885,13 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
             f"Found {num_markets_processed} h5n1 markets needing eligibility classification."
         )
 
-        # Map score type names to their enum IDs directly (no DB query needed)
-        score_type_ids = {}
-        score_names = ["temporal_relevance", "geographical_relevance",
-                       "index_question_relevance", "volume_total"]
-
-        for score_name in score_names:
-            try:
-                score_type = MarketRelevanceScoreType.from_string(score_name)
-                score_type_ids[score_name] = score_type.value  # .value gives the int ID
-            except ValueError:
-                context.log.warning(f"Invalid score type name: {score_name}")
-
-    temporal_score_type_id = score_type_ids["temporal_relevance"]
-    geo_score_type_id = score_type_ids["geographical_relevance"]
-    question_score_type_id = score_type_ids["index_question_relevance"]
-    volume_score_type_id = score_type_ids["volume_total"]
+        # Use unified index_question_relevance score (replaces temp/geo/question)
+        question_score_type_id = MarketRelevanceScoreType.INDEX_QUESTION_RELEVANCE.value
+        volume_score_type_id = MarketRelevanceScoreType.VOLUME_TOTAL.value
 
     # Fetch all relevance scores for these markets
     market_ids = [m.id for m in markets_to_process]
     score_type_ids_set = {
-        temporal_score_type_id,
-        geo_score_type_id,
         question_score_type_id,
         volume_score_type_id,
     }
@@ -877,8 +936,6 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
                 session.commit()
 
     for m in markets_to_process:
-        temp_score = score_lookup.get((m.id, temporal_score_type_id))
-        geo_score = score_lookup.get((m.id, geo_score_type_id))
         question_score = score_lookup.get((m.id, question_score_type_id))
         volume_score = score_lookup.get((m.id, volume_score_type_id))
 
@@ -897,13 +954,15 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
             classification_results.append((m.id, False))
             continue
 
-        if None in (temp_score, geo_score, question_score):
-            context.log.warning(f"Missing score(s) for market {m.id}; skipping classification.")
+        if question_score is None:
+            context.log.warning(f"Missing relevance score for market {m.id}; skipping classification.")
             num_skipped += 1
             continue
 
-        prediction = eligibility_classifier.predict(temp_score, geo_score, question_score)
-        classification_results.append((m.id, prediction))
+        # Simple threshold-based eligibility using unified relevance score
+        # Markets with high relevance (>0.6) and sufficient volume are eligible
+        is_eligible = question_score >= 0.6
+        classification_results.append((m.id, is_eligible))
 
     num_markets_eligible = sum(1 for _, is_eligible in classification_results if is_eligible)
 
@@ -984,12 +1043,11 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
                 "description": market.description or "",
                 "text_rep": market.text_rep
             }
-        
-        # Prepare prompt with proper context
+        index_question = "Will there be a large scale H5N1 outbreak in humans  in the next 12 months?"
+        # Prepare prompt with proper context from config
         prompt_data = PromptInformation(
-            disease="H5N1",
             date=datetime.now(UTC),
-            overall_index_question="Will there be a massive H5N1 outbreak in the next 12 months?",
+            overall_index_question=index_question,
             num_of_rules=30
         )
         
@@ -1013,16 +1071,14 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
             rule_json = rule_obj.rule.model_dump_json()
             readable = stringify_formula(rule_obj.rule, session)
 
-            # Get disease information for prompts
-            disease_info = DiseaseInformation(
-                disease="H5N1",
+            # Get disease information for prompts from config (already imported above)
+            index_info = IndexInformation(
                 date=datetime.now(UTC),
-                overall_index_question=
-                "Will there be a massive H5N1 outbreak in the next 12 months?"
+                overall_index_question=index_question
             )
 
             # Get strength score using rule strength prompt
-            strength_prompt = get_prompt("rule_strength_score_prompt.j2", disease_info)
+            strength_prompt = get_prompt("rule_strength_score_prompt.j2", index_info)
             client = get_client()
             strength_reasonings, strength_scores, strength_avg = get_weight(
                 strength_prompt, readable, client
@@ -1058,7 +1114,7 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
                     metrics_text += f"  {metric_name}: {value}\n"
 
             # Get relevance score using rule relevance prompt
-            relevance_prompt = get_prompt("rule_relevance_score_prompt.j2", disease_info)
+            relevance_prompt = get_prompt("rule_relevance_score_prompt.j2", index_info)
             relevance_reasonings, relevance_scores, relevance_avg = get_relevance(
                 relevance_prompt, metrics_text, client
             )

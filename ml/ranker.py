@@ -21,14 +21,12 @@ class MarketRelevance(BaseModel):
     relevance_score: float = Field(ge=0, le=1, description="Score from 0 to 1 indicating "
                                                            "market relevance.")
 
-class DiseaseInformation(BaseModel):
+class IndexInformation(BaseModel):
     """Structured model for Disease information."""
-
-    disease: str = Field(description="What disease we are interested in.")
-    date: datetime = Field(description="The date we are interested in.")
+    todays_date: datetime = Field(description="The date for the index val.")
     overall_index_question: str = Field(description="Overall index question.")
 
-def get_prompt(prompt_template_file: str, disease_data: DiseaseInformation) -> str:
+def get_prompt(prompt_template_file: str, disease_data: IndexInformation) -> str:
     """
     Use a template file to generate a prompt.
 

@@ -260,8 +260,6 @@ class Response(BaseModel):
 # --- Data Model for Prompt Input ---
 class PromptInformation(BaseModel):
     """Structured model for Disease information."""
-
-    disease: str = Field(description="What disease we are interested in.")
     date: datetime = Field(description="The date we are interested in.")
     overall_index_question: str = Field(description="Overall index question.")
     num_of_rules: int = Field(description="Number of rules to be generated.")

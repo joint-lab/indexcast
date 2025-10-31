@@ -182,6 +182,7 @@ class MarketLabelType(SQLModel, table=True):
 
     # Relationship back to markets that use this label
     market_labels: list["MarketLabel"] = Relationship(back_populates="label_type")
+    relevance_prompts: list["RelevancePrompt"] = Relationship(back_populates="label_type")
 
 class MarketLabel(SQLModel, table=True):
     """Junction table linking markets to their labels."""
