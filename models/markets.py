@@ -6,9 +6,8 @@ Authors:
 - Erik Arnold <ewarnold@uvm.edu>
 """
 from datetime import UTC, datetime
-from enum import IntEnum
+from enum import IntEnum, StrEnum
 from typing import Optional
-
 from sqlmodel import Field, Relationship, SQLModel
 
 
@@ -370,30 +369,87 @@ class Index(SQLModel, table=True):
 
     id: int = Field(primary_key=True)
     index_probability: float = Field(description="Calculated probability of H5N1 outbreak")
+    index_question: str = Field(foreign_key="index_questions.question")
     json_representation: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     rules: list["MarketRule"] = Relationship(
         back_populates="indices", link_model=IndexRuleLink
     )
+    index_question_rel: "IndexQuestion" = Relationship(back_populates="indices")
 
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-# Index relevance prompt
+# Link table between IndexQuestion and MarketLabelType
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-class RelevancePrompt(SQLModel, table=True):
-    """Meta-generated relevance evaluation prompt for a specific market label/index question."""
+class IndexQuestionLabelLink(SQLModel, table=True):
+    """Junction table linking index questions and label types."""
 
-    __tablename__ = "relevance_prompts"
+    __tablename__ = "index_question_label_links"
+
+    index_question: str = Field(foreign_key="index_questions.question", primary_key=True)
+    label_type_id: int = Field(foreign_key="market_label_types.id", primary_key=True)
+
+    # Relationships
+    index_question_rel: "IndexQuestion" = Relationship(back_populates="label_links")
+    label_type: "MarketLabelType" = Relationship(back_populates="index_question_links")
+
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Index Question
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+class IndexQuestion(SQLModel, table=True):
+    """Questions for indexcast indices."""
+
+    __tablename__ = "index_questions"
+
+    question: str = Field(primary_key=True, description="The index question text")
+
+    # Relationships
+    label_links: list["IndexQuestionLabelLink"] = Relationship(back_populates="index_question_rel")
+    labels: list["MarketLabelType"] = Relationship(
+        back_populates="index_question_links",
+        link_model=IndexQuestionLabelLink,
+    )
+
+    indices: list["Index"] = Relationship(back_populates="index_question")
+
+
+    # Add the reverse relationship to MarketLabelType
+    MarketLabelType.index_question_links = Relationship(
+        back_populates="label_type",
+        link_model=IndexQuestionLabelLink,
+    )
+    relevance_prompts: list["RelevancePrompt"] = Relationship(back_populates="index_question_rel")
+
+
+class PromptPurpose(StrEnum):
+    RELEVANCE = "Relevance"
+    RULE = "Rule"
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Index prompt
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+class Prompt(SQLModel, table=True):
+    """Meta-generated prompts for relevance or rule gen for an index question."""
+
+    __tablename__ = "prompts"
 
     id: int = Field(primary_key=True)
     prompt: str = Field(description="The meta-generated relevance evaluation prompt")
+    purpose: PromptPurpose = Field(
+        description="Purpose of the prompt: 'Relevance' or 'Rule'"
+    )
 
-    # Link to the market label / index question this prompt is for
-    label_type_id: int = Field(foreign_key="market_label_types.id",
-                               description="Market label or index this prompt is associated with")
-    label_type: MarketLabelType = Relationship(back_populates="relevance_prompts")
+    # Link to the index question this prompt is for
+    index_question: str = Field(
+        foreign_key="index_questions.question",
+        description="The index question this prompt is associated with"
+    )
 
-    index_question: str = Field(description="The index question used to generate this prompt")
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    # Relationships
+    index_question_rel: "IndexQuestion" = Relationship(back_populates="relevance_prompts")
+
 
