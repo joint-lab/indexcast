@@ -387,7 +387,7 @@ class IndexQuestionLabelLink(SQLModel, table=True):
 
     __tablename__ = "index_question_label_links"
 
-    index_question: str = Field(foreign_key="index_questions.question", primary_key=True)
+    index_question_id: int = Field(foreign_key="index_questions.id", primary_key=True)
     label_type_id: int = Field(foreign_key="market_label_types.id", primary_key=True)
 
     # Relationships
@@ -403,7 +403,8 @@ class IndexQuestion(SQLModel, table=True):
 
     __tablename__ = "index_questions"
 
-    question: str = Field(primary_key=True, description="The index question text")
+    id: int = Field(primary_key=True)
+    question: str = Field(description="The index question text")
 
     # Relationships
     label_links: list["IndexQuestionLabelLink"] = Relationship(back_populates="index_question_rel")

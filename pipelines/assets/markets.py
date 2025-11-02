@@ -48,7 +48,7 @@ from models.markets import (
     MarketRule,
     MarketRuleLink,
     PipelineStageType,
-    RelevancePrompt,
+    Prompt,
 )
 from pipelines.resources.db import locked_session
 
@@ -753,13 +753,13 @@ def relevance_score(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
         
         # Get the meta-generated prompt for this label type
         relevance_prompt_obj = session.exec(
-            select(RelevancePrompt)
+            select(Prompt)
             .where(
-                RelevancePrompt.label_type_id == h5n1_result.id,
-                RelevancePrompt.index_question == "Will there be a large scale "
+                Prompt.label_type_id == h5n1_result.id,
+                Prompt.index_question == "Will there be a large scale "
                                                   "H5N1 outbreak in humans  in the next 12 months?"
             )
-            .order_by(RelevancePrompt.created_at.desc())
+            .order_by(Prompt.created_at.desc())
         ).first()
         index_question = ("Will there be a large scale H5N1 "
                           "outbreak in humans  in the next 12 months?")
