@@ -681,38 +681,48 @@ def relevance_prompts(context: dg.AssetExecutionContext) -> dg.MaterializeResult
     Generate task-specific relevance prompts using meta-prompting.
     
     This asset generates optimized relevance evaluation prompts for each
-    market label type using the meta-prompt template.
+    index question using the meta-prompt template.
     """
+    from models.markets import IndexQuestion
+    
     client = get_client()
     
     with Session(context.resources.database_engine) as session:
-        # Get all label types that need prompts
-        label_types = session.exec(select(MarketLabelType)).all()
-        label_type = session.exec(select(MarketLabelType)).first()
+        # Get all index questions that need prompts
+        index_questions = session.exec(select(IndexQuestion)).all()
+        
+        if not index_questions:
+            context.log.warning("No index questions found in database.")
+            return dg.MaterializeResult(
+                metadata={
+                    "num_prompts_generated": dg.MetadataValue.int(0),
+                    "num_prompts_existing": dg.MetadataValue.int(0),
+                    "total_index_questions": dg.MetadataValue.int(0),
+                }
+            )
+        
         prompts_created = 0
         prompts_existing = 0
         
-        ### HARD CODING FOR H5N1, WILL NEED TO BE REWORKED
-        prompt_obj = get_or_create_relevance_prompt(
-            session=session,
-            label_type_id=label_type.id,
-            index_question="Will there be a large scale "
-                           "H5N1 outbreak in humans  in the next 12 months?",
-            current_date=datetime.now(UTC),
-            client=client,
-            force_regenerate=False,
-        )
+        for index_question in index_questions:
+            prompt_obj = get_or_create_relevance_prompt(
+                session=session,
+                index_question_id=index_question.id,
+                current_date=datetime.now(UTC),
+                client=client,
+                force_regenerate=False,
+            )
 
-        if prompt_obj.created_at >= datetime.now(UTC) - timedelta(seconds=10):
-            prompts_created += 1
-            context.log.info(
-                f"Generated new prompt for label '{label_type.label_name}'"
-            )
-        else:
-            prompts_existing += 1
-            context.log.info(
-                f"Using existing prompt for label '{label_type.label_name}'"
-            )
+            if prompt_obj.created_at >= datetime.now(UTC) - timedelta(seconds=10):
+                prompts_created += 1
+                context.log.info(
+                    f"Generated new prompt for question '{index_question.question}'"
+                )
+            else:
+                prompts_existing += 1
+                context.log.info(
+                    f"Using existing prompt for question '{index_question.question}'"
+                )
         
         session.commit()
     
@@ -720,7 +730,7 @@ def relevance_prompts(context: dg.AssetExecutionContext) -> dg.MaterializeResult
         metadata={
             "num_prompts_generated": dg.MetadataValue.int(prompts_created),
             "num_prompts_existing": dg.MetadataValue.int(prompts_existing),
-            "total_label_types": dg.MetadataValue.int(len(label_types)),
+            "total_index_questions": dg.MetadataValue.int(len(index_questions)),
         }
     )
 
@@ -741,6 +751,8 @@ def relevance_score(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     """
     client = get_client()
     
+    from models.markets import IndexQuestion, PromptPurpose
+    
     # Get list of market ids that have been labeled
     with Session(context.resources.database_engine) as session:
         h5n1_result = session.exec(
@@ -751,22 +763,29 @@ def relevance_score(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
             context.log.warning("No h5n1 label type found.")
             return dg.MaterializeResult(metadata={})
         
-        # Get the meta-generated prompt for this label type
+        # Get the first index question (hardcoded for H5N1 for now)
+        index_question_obj = session.exec(
+            select(IndexQuestion)
+        ).first()
+        
+        if not index_question_obj:
+            context.log.error("No index question found. Create one first.")
+            return dg.MaterializeResult(metadata={})
+        
+        # Get the meta-generated prompt for this index question
         relevance_prompt_obj = session.exec(
             select(Prompt)
             .where(
-                Prompt.label_type_id == h5n1_result.id,
-                Prompt.index_question == "Will there be a large scale "
-                                                  "H5N1 outbreak in humans  in the next 12 months?"
+                Prompt.index_question_id == str(index_question_obj.id),
+                Prompt.purpose == PromptPurpose.RELEVANCE
             )
             .order_by(Prompt.created_at.desc())
         ).first()
-        index_question = ("Will there be a large scale H5N1 "
-                          "outbreak in humans  in the next 12 months?")
+        
         if not relevance_prompt_obj:
             context.log.error(
-                f"No relevance prompt found for label '{h5n1_result.label_name}' "
-                f"and question '{index_question}'. Run meta_prompts asset first."
+                f"No relevance prompt found for question '{index_question_obj.question}'. "
+                f"Run relevance_prompts asset first."
             )
             return dg.MaterializeResult(metadata={})
         
@@ -801,8 +820,7 @@ def relevance_score(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
         reasonings, scores, average_score = get_relevance(
             meta_generated_prompt, 
             market.text_rep, 
-            client,
-            n_runs=10
+            client
         )
         
         # Collect for batch write
@@ -856,7 +874,7 @@ def relevance_score(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
 
 
 @dg.asset(
-    deps=[relevance_score],
+    deps=[relevance_score, relevance_summary_statistics],
     required_resource_keys={"database_engine"},
     description="Market eligibility labels."
 )
@@ -1077,7 +1095,7 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
 
             # Get disease information for prompts from config (already imported above)
             index_info = IndexInformation(
-                date=datetime.now(UTC),
+                todays_date=datetime.now(UTC),
                 overall_index_question=index_question
             )
 
@@ -1256,9 +1274,20 @@ def eval_formula(formula: Formula, world_row: np.ndarray, market_index_map: dict
 )
 def index_value(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     """Run Monte Carlo simulation to calculate H5N1 outbreak probability."""
+    from models.markets import IndexQuestion
+    
     # set seed
     np.random.seed(42)
     with (Session(context.resources.database_engine) as session):
+        # Get the index question (hardcoded to first one for H5N1)
+        index_question_obj = session.exec(
+            select(IndexQuestion)
+        ).first()
+        
+        if not index_question_obj:
+            context.log.error("No index question found. Create one first.")
+            return dg.MaterializeResult(metadata={})
+        
         # get the most recent batch number
         latest_batch = session.exec(
             select(MarketRule.batch_id)
@@ -1417,6 +1446,7 @@ def index_value(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
         # add to the DB
         new_index = Index(
             index_probability=float(risk_index),
+            index_question_id=str(index_question_obj.id),
             created_at=datetime.now(UTC),
             json_representation=json.dumps(json_rep)
         )

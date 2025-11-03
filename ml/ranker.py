@@ -22,18 +22,18 @@ class MarketRelevance(BaseModel):
                                                            "market relevance.")
 
 class IndexInformation(BaseModel):
-    """Structured model for Disease information."""
+    """Structured model for Index information."""
 
     todays_date: datetime = Field(description="The date for the index val.")
     overall_index_question: str = Field(description="Overall index question.")
 
-def get_prompt(prompt_template_file: str, disease_data: IndexInformation) -> str:
+def get_prompt(prompt_template_file: str, index_data: IndexInformation) -> str:
     """
     Use a template file to generate a prompt.
 
     Args:
         prompt_template_file: template file to use.
-        disease_data: disease_information about the event.
+        index_data: information about the event.
 
     Returns:
         A rendered prompt.
@@ -46,9 +46,8 @@ def get_prompt(prompt_template_file: str, disease_data: IndexInformation) -> str
         autoescape=True
     )
     template = env.get_template(prompt_template_file)
-    return template.render(disease = disease_data.disease,
-                           date = disease_data.date,
-                           overall_index_question = disease_data.overall_index_question)
+    return template.render(date=index_data.todays_date,
+                           overall_index_question = index_data.overall_index_question)
 
 
 def get_relevance(prompt: str, market_text_representation: str,

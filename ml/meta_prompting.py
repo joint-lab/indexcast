@@ -14,7 +14,7 @@ from jinja2 import Environment, FileSystemLoader
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
-from models.markets import Prompt
+from models.markets import IndexQuestion, Prompt, PromptPurpose
 
 
 class MetaPromptResponse(BaseModel):
@@ -58,19 +58,26 @@ def generate_meta_prompt(
 
 def get_or_create_relevance_prompt(
     session: Session,
-    label_type_id: int,
-    index_question: str,
+    index_question_id: int,
     current_date: datetime,
     client: instructor.Instructor,
     force_regenerate: bool = False,
 ) -> Prompt:
     """Get existing relevance prompt or generate a new one if needed."""
+    # Get the index question text
+    index_question_obj = session.exec(
+        select(IndexQuestion).where(IndexQuestion.id == index_question_id)
+    ).first()
+    
+    if not index_question_obj:
+        raise ValueError(f"IndexQuestion with id {index_question_id} not found")
+    
     if not force_regenerate:
         existing = session.exec(
             select(Prompt)
             .where(
-                Prompt.label_type_id == label_type_id,
-                Prompt.index_question == index_question
+                Prompt.index_question_id == str(index_question_id),
+                Prompt.purpose == PromptPurpose.RELEVANCE
             )
             .order_by(Prompt.created_at.desc())
         ).first()
@@ -79,15 +86,15 @@ def get_or_create_relevance_prompt(
             return existing
     
     generated_prompt = generate_meta_prompt(
-        overall_index_question=index_question,
+        overall_index_question=index_question_obj.question,
         current_date=current_date,
         client=client,
     )
     
     new_prompt = Prompt(
         prompt=generated_prompt,
-        label_type_id=label_type_id,
-        index_question=index_question,
+        index_question_id=str(index_question_id),
+        purpose=PromptPurpose.RELEVANCE,
         created_at=datetime.now(UTC),
     )
     

@@ -243,19 +243,34 @@ class Response(BaseModel):
         """Filter out invalid items before validation."""
         if isinstance(data, dict) and 'content' in data:
             if isinstance(data['content'], list):
-                # Filter out items with validation errors
                 valid_items = []
                 for item in data['content']:
                     try:
-                        # Quick check for empty/invalid items
                         if not isinstance(item, dict):
                             continue
-                        if not item.get('reasoning', '').strip():
+
+                        # Normalize reasoning to a string if it's a list
+                        reasoning = item.get('reasoning', '')
+                        if isinstance(reasoning, list):
+                            reasoning = " ".join(map(str, reasoning))
+                        if not reasoning.strip():
                             continue
-                        if not item.get('verbalization', '').strip():
+
+                        # Normalize verbalization to a string if it's a list
+                        verbalization = item.get('verbalization', '')
+                        if isinstance(verbalization, list):
+                            verbalization = " ".join(map(str, verbalization))
+                        if not verbalization.strip():
                             continue
+
+                        # Rule must exist and be non-empty
                         if not item.get('rule') or item.get('rule') == '':
                             continue
+
+                        # Replace original values with normalized strings
+                        item['reasoning'] = reasoning
+                        item['verbalization'] = verbalization
+
                         valid_items.append(item)
                     except Exception as e:
                         raise RuntimeError("Invalid") from e
@@ -263,6 +278,7 @@ class Response(BaseModel):
                 data['content'] = valid_items
 
         return data
+
 
 # --- Data Model for Prompt Input ---
 class PromptInformation(BaseModel):
@@ -300,7 +316,6 @@ def get_rules_prompt(
     )
     template = env.get_template(prompt_template_file)
     return template.render(
-        disease=prompt_data.disease,
         date=prompt_data.date,
         overall_index_question=prompt_data.overall_index_question,
         num_of_rules=prompt_data.num_of_rules,
