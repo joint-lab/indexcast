@@ -19,7 +19,7 @@ from scipy.stats import norm
 from sqlalchemy import delete, func
 from sqlmodel import Session, select
 
-from ml.classification import H5N1Classifier, RuleEligibilityClassifier
+from ml.classification import H5N1Classifier
 from ml.clients import get_client
 from ml.meta_prompting import get_or_create_relevance_prompt
 from ml.ranker import IndexInformation, get_prompt, get_relevance
@@ -916,7 +916,6 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
 
     # Apply classification logic
     classification_results = []
-    eligibility_classifier = RuleEligibilityClassifier()
     # this threshold is determined using calibration city
     # for manifold volume under 400 mana is not calibrated enough
     volume_threshold = 400

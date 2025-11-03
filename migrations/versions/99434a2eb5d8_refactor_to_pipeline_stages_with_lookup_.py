@@ -38,10 +38,8 @@ def upgrade() -> None:
         (1, 'classified', 'Market has been classified'),
         (2, 'full_market', 'Full market data has been retrieved'),
         (3, 'market_data_relevances_recorded', 'Market data relevances have been recorded'),
-        (4, 'temp_relevance_scored', 'Temporal relevance has been scored'),
-        (5, 'geo_relevance_scored', 'Geographic relevance has been scored'),
-        (6, 'index_question_relevance_scored', 'Index question relevance has been scored'),
-        (7, 'rule_eligibility', 'Rule eligibility has been determined'),
+        (4, 'index_question_relevance_scored', 'Index question relevance has been scored'),
+        (5, 'rule_eligibility', 'Rule eligibility has been determined'),
     ]
 
     for stage_id, stage_name, description in stages:

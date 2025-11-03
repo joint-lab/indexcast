@@ -257,9 +257,8 @@ class Response(BaseModel):
                         if not item.get('rule') or item.get('rule') == '':
                             continue
                         valid_items.append(item)
-                    except Exception:
-                        # Skip items that fail basic validation
-                        continue
+                    except Exception as e:
+                        raise RuntimeError("Invalid") from e
 
                 data['content'] = valid_items
 

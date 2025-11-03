@@ -8,7 +8,23 @@ Authors:
 from datetime import UTC, datetime
 from enum import IntEnum, StrEnum
 from typing import Optional
+
 from sqlmodel import Field, Relationship, SQLModel
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Link table between IndexQuestion and MarketLabelType
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+class IndexQuestionLabelLink(SQLModel, table=True):
+    """Junction table linking index questions and label types."""
+
+    __tablename__ = "index_question_label_links"
+
+    index_question_id: int = Field(foreign_key="index_questions.id", primary_key=True)
+    label_type_id: int = Field(foreign_key="market_label_types.id", primary_key=True)
+
+    # Relationships
+    index_question_rel: "IndexQuestion" = Relationship(back_populates="label_links")
+    label_type: "MarketLabelType" = Relationship(back_populates="index_question_links")
 
 
 class MarketRuleLink(SQLModel, table=True):
@@ -181,7 +197,15 @@ class MarketLabelType(SQLModel, table=True):
 
     # Relationship back to markets that use this label
     market_labels: list["MarketLabel"] = Relationship(back_populates="label_type")
-    relevance_prompts: list["RelevancePrompt"] = Relationship(back_populates="label_type")
+
+    # junction entries pointing to this label type
+    index_question_links: list["IndexQuestionLabelLink"] = Relationship(back_populates="label_type")
+
+    # the many-to-many view of IndexQuestion objects that use this label
+    labels: list["IndexQuestion"] = Relationship(
+        back_populates="labels",
+        link_model=IndexQuestionLabelLink,
+    )
 
 class MarketLabel(SQLModel, table=True):
     """Junction table linking markets to their labels."""
@@ -209,9 +233,7 @@ class MarketRelevanceScoreType(IntEnum):
     VOLUME_144h = 3
     NUM_TRADERS = 4
     NUM_COMMENTS = 5
-    TEMPORAL_RELEVANCE = 6
-    GEOGRAPHICAL_RELEVANCE = 7
-    INDEX_QUESTION_RELEVANCE = 8
+    INDEX_QUESTION_RELEVANCE = 6
 
     @property
     def relevance_score(self) -> str:
@@ -227,8 +249,6 @@ class MarketRelevanceScoreType(IntEnum):
             "volume_144h": cls.VOLUME_144h,
             "num_traders": cls.NUM_TRADERS,
             "num_comments": cls.NUM_COMMENTS,
-            "temporal_relevance": cls.TEMPORAL_RELEVANCE,
-            "geographical_relevance": cls.GEOGRAPHICAL_RELEVANCE,
             "index_question_relevance": cls.INDEX_QUESTION_RELEVANCE,
         }
         if name not in mapping:
@@ -265,10 +285,8 @@ class PipelineStageType(IntEnum):
     CLASSIFIED = 1
     FULL_MARKET = 2
     MARKET_DATA_RELEVANCES_RECORDED = 3
-    TEMP_RELEVANCE_SCORED = 4
-    GEO_RELEVANCE_SCORED = 5
-    INDEX_QUESTION_RELEVANCE_SCORED = 6
-    RULE_ELIGIBILITY = 7
+    INDEX_QUESTION_RELEVANCE_SCORED = 4
+    RULE_ELIGIBILITY = 5
 
     @property
     def stage_name(self) -> str:
@@ -282,8 +300,6 @@ class PipelineStageType(IntEnum):
             "classified": cls.CLASSIFIED,
             "full_market": cls.FULL_MARKET,
             "market_data_relevances_recorded": cls.MARKET_DATA_RELEVANCES_RECORDED,
-            "temp_relevance_scored": cls.TEMP_RELEVANCE_SCORED,
-            "geo_relevance_scored": cls.GEO_RELEVANCE_SCORED,
             "index_question_relevance_scored": cls.INDEX_QUESTION_RELEVANCE_SCORED,
             "rule_eligibility": cls.RULE_ELIGIBILITY,
         }
@@ -369,30 +385,13 @@ class Index(SQLModel, table=True):
 
     id: int = Field(primary_key=True)
     index_probability: float = Field(description="Calculated probability of H5N1 outbreak")
-    index_question: str = Field(foreign_key="index_questions.question")
+    index_question_id: str = Field(foreign_key="index_questions.id")
     json_representation: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
-    rules: list["MarketRule"] = Relationship(
-        back_populates="indices", link_model=IndexRuleLink
-    )
+    rules: list["MarketRule"] = Relationship(back_populates="indices", link_model=IndexRuleLink)
+    # match the name used on IndexQuestion
     index_question_rel: "IndexQuestion" = Relationship(back_populates="indices")
-
-
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-# Link table between IndexQuestion and MarketLabelType
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-class IndexQuestionLabelLink(SQLModel, table=True):
-    """Junction table linking index questions and label types."""
-
-    __tablename__ = "index_question_label_links"
-
-    index_question_id: int = Field(foreign_key="index_questions.id", primary_key=True)
-    label_type_id: int = Field(foreign_key="market_label_types.id", primary_key=True)
-
-    # Relationships
-    index_question_rel: "IndexQuestion" = Relationship(back_populates="label_links")
-    label_type: "MarketLabelType" = Relationship(back_populates="index_question_links")
 
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -407,24 +406,25 @@ class IndexQuestion(SQLModel, table=True):
     question: str = Field(description="The index question text")
 
     # Relationships
+    # junction rows (IndexQuestionLabelLink)
     label_links: list["IndexQuestionLabelLink"] = Relationship(back_populates="index_question_rel")
+
+    # many-to-many: use the same back_populates name on both sides ("labels")
     labels: list["MarketLabelType"] = Relationship(
-        back_populates="index_question_links",
+        back_populates="labels",
         link_model=IndexQuestionLabelLink,
     )
 
-    indices: list["Index"] = Relationship(back_populates="index_question")
+    # match Index.index_question_rel above
+    indices: list["Index"] = Relationship(back_populates="index_question_rel")
 
-
-    # Add the reverse relationship to MarketLabelType
-    MarketLabelType.index_question_links = Relationship(
-        back_populates="label_type",
-        link_model=IndexQuestionLabelLink,
-    )
-    relevance_prompts: list["RelevancePrompt"] = Relationship(back_populates="index_question_rel")
+    # prompts
+    prompts: list["Prompt"] = Relationship(back_populates="index_question_rel")
 
 
 class PromptPurpose(StrEnum):
+    """Enum for the purposes of a prompt."""
+
     RELEVANCE = "Relevance"
     RULE = "Rule"
 
@@ -443,14 +443,13 @@ class Prompt(SQLModel, table=True):
     )
 
     # Link to the index question this prompt is for
-    index_question: str = Field(
-        foreign_key="index_questions.question",
+    index_question_id: str = Field(
+        foreign_key="index_questions.id",
         description="The index question this prompt is associated with"
     )
 
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     # Relationships
-    index_question_rel: "IndexQuestion" = Relationship(back_populates="relevance_prompts")
-
+    index_question_rel: "IndexQuestion" = Relationship(back_populates="prompts")
 

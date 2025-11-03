@@ -14,7 +14,7 @@ from jinja2 import Environment, FileSystemLoader
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
-from models.markets import RelevancePrompt
+from models.markets import Prompt
 
 
 class MetaPromptResponse(BaseModel):
@@ -63,16 +63,16 @@ def get_or_create_relevance_prompt(
     current_date: datetime,
     client: instructor.Instructor,
     force_regenerate: bool = False,
-) -> RelevancePrompt:
+) -> Prompt:
     """Get existing relevance prompt or generate a new one if needed."""
     if not force_regenerate:
         existing = session.exec(
-            select(RelevancePrompt)
+            select(Prompt)
             .where(
-                RelevancePrompt.label_type_id == label_type_id,
-                RelevancePrompt.index_question == index_question
+                Prompt.label_type_id == label_type_id,
+                Prompt.index_question == index_question
             )
-            .order_by(RelevancePrompt.created_at.desc())
+            .order_by(Prompt.created_at.desc())
         ).first()
         
         if existing:
@@ -84,7 +84,7 @@ def get_or_create_relevance_prompt(
         client=client,
     )
     
-    new_prompt = RelevancePrompt(
+    new_prompt = Prompt(
         prompt=generated_prompt,
         label_type_id=label_type_id,
         index_question=index_question,
