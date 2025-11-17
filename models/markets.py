@@ -12,22 +12,6 @@ from typing import Optional
 from sqlmodel import Field, Relationship, SQLModel
 
 
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-# Link table between IndexQuestion and MarketLabelType
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-class IndexQuestionLabelLink(SQLModel, table=True):
-    """Junction table linking index questions and label types."""
-
-    __tablename__ = "index_question_label_links"
-
-    index_question_id: int = Field(foreign_key="index_questions.id", primary_key=True)
-    label_type_id: int = Field(foreign_key="market_label_types.id", primary_key=True)
-
-    # Relationships
-    index_question_rel: "IndexQuestion" = Relationship(back_populates="label_links")
-    label_type: "MarketLabelType" = Relationship(back_populates="index_question_links")
-
-
 class MarketRuleLink(SQLModel, table=True):
     """Table linking markets and rules."""
 
@@ -199,15 +183,6 @@ class MarketLabelType(SQLModel, table=True):
     # Relationship back to markets that use this label
     market_labels: list["MarketLabel"] = Relationship(back_populates="label_type")
 
-    # junction entries pointing to this label type
-    index_question_links: list["IndexQuestionLabelLink"] = Relationship(back_populates="label_type")
-
-    # the many-to-many view of IndexQuestion objects that use this label
-    labels: list["IndexQuestion"] = Relationship(
-        back_populates="labels",
-        link_model=IndexQuestionLabelLink,
-    )
-
 class MarketLabel(SQLModel, table=True):
     """Junction table linking markets to their labels."""
 
@@ -220,6 +195,25 @@ class MarketLabel(SQLModel, table=True):
     market: "Market" = Relationship(back_populates="labels")
     label_type: MarketLabelType = Relationship(back_populates="market_labels")
 
+
+class LabelType(StrEnum):
+    initial = "initial"
+    final = "final"
+
+
+class LabelInfo(SQLModel, table=True):
+    """Table to dump lm labeling information."""
+
+    __tablename__ = "labels_info_dump"
+
+    id: int = Field(primary_key=True)
+    market_id: str = Field(foreign_key="markets.id")
+    type: LabelType = Field(index=True)
+    output: str
+    dumped_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    # Relationships
+    market: "Market" = Relationship(back_populates="labels")
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # Market ranking
@@ -264,7 +258,6 @@ class MarketRelevanceScore(SQLModel, table=True):
     market_id: str = Field(primary_key=True, foreign_key="markets.id")
     score_type_id: int = Field(primary_key=True)
     score_value: float
-    scores: str | None = None
     chain_of_thoughts: str | None = None
 
     # Relationships
@@ -407,15 +400,6 @@ class IndexQuestion(SQLModel, table=True):
     question: str = Field(description="The index question text")
 
     # Relationships
-    # junction rows (IndexQuestionLabelLink)
-    label_links: list["IndexQuestionLabelLink"] = Relationship(back_populates="index_question_rel")
-
-    # many-to-many: use the same back_populates name on both sides ("labels")
-    labels: list["MarketLabelType"] = Relationship(
-        back_populates="labels",
-        link_model=IndexQuestionLabelLink,
-    )
-
     # match Index.index_question_rel above
     indices: list["Index"] = Relationship(back_populates="index_question_rel")
 
