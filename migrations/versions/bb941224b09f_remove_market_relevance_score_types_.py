@@ -22,9 +22,6 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Remove FK from market_relevance_scores and drop market_relevance_score_types table."""
-    # In SQLite, we can't just drop a foreign key. We need to recreate the table.
-    # Use batch mode to handle this properly
-    
     # Step 1: Create a temporary table with the correct schema (no FK to market_relevance_score_types)
     op.create_table(
         'market_relevance_scores_new',
