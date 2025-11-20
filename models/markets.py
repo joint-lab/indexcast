@@ -80,6 +80,7 @@ class Market(SQLModel, table=True):
     )
 
     # Relationships
+    label_infos: list["LabelInfo"] = Relationship(back_populates="market")
     comments: list["MarketComment"] = Relationship(back_populates="market")
     labels: list["MarketLabel"] = Relationship(back_populates="market")
     pipeline_events: list["MarketPipelineEvent"] = Relationship(back_populates="market")
@@ -197,6 +198,8 @@ class MarketLabel(SQLModel, table=True):
 
 
 class LabelType(StrEnum):
+    """Label dump label type. Either initial prompt or DSPy final with relevance."""
+
     initial = "initial"
     final = "final"
 
@@ -213,7 +216,7 @@ class LabelInfo(SQLModel, table=True):
     dumped_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     # Relationships
-    market: "Market" = Relationship(back_populates="labels")
+    market: "Market" = Relationship(back_populates="label_infos")
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # Market ranking
@@ -259,6 +262,7 @@ class MarketRelevanceScore(SQLModel, table=True):
     score_type_id: int = Field(primary_key=True)
     score_value: float
     chain_of_thoughts: str | None = None
+    label_id: int = Field(foreign_key="market_label_types.id")
 
     # Relationships
     market: "Market" = Relationship(back_populates="scores")
@@ -358,6 +362,7 @@ class MarketRule(SQLModel, table=True):
     relevance_chain: str | None = None
     # batch id
     batch_id: int | None = None
+    index_id: int | None = None
 
     # Relationship
     markets: list["Market"] = Relationship(

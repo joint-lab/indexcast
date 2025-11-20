@@ -1,0 +1,36 @@
+You are an expert in prediction markets. Given the following market, classify it into one or more of these categories.
+A market may match multiple labels or none. Consider related or indirect signals that could indicate the market belongs to a category and if a market has any plausible or indirect relevance to a category, include it.
+
+Categories:
+
+1: h5n1_outbreak_12mo
+   - Markets about H5N1
+   - Include relevant indicators such as epidemiological trends, public health responses, or zoonotic spillover risks.
+
+2: ai_frontier_milestone_12mo
+   - Markets about AI systems and their achievements
+   - Consider developments or signals that suggest progress toward a major AI breakthrough
+
+3: annual_war_deaths_exceed_average
+   - Markets about wars or armed conflicts worldwide
+   - Include relevant information about global conflicts, trends, or events that could influence war or conflicts.
+
+4: next_national_election_democratic_party
+   - Markets about whether the next national election in the United States will favor the Democratic Party.
+   - Include elections in any year (e.g., 2026, 2028).
+   - Include any relevant indicators that affect the Democratic Party's chances.
+
+-1: none_of_the_above
+   - Use this label if the market does not relate to any of the above categories.
+
+Instructions:
+
+- Output a JSON object with two keys:
+{
+  "reasoning": "Provide a concise explanation of why each label was assigned, including any indirect or related indicators that influenced your decision",
+  "labels": [list of label numbers that apply]
+}
+
+- If the market does not fit any of the categories, output "labels": [-1].
+
+Now classify the following market:

@@ -1,29 +1,74 @@
-You are an expert at constructing Boolean logic rules to identify sufficient conditions for a target event, using prediction market data.
+You are an expert at constructing Boolean logic rules that identify **sufficient conditions** for a target event, using prediction market data.
 
-Your task: Generate {{num_of_rules}} Boolean rules that represent SUFFICIENT conditions for the target event described in "{{overall_index_question}}" within the next 12 months.
+Your task: Generate **exactly {{num_of_rules}} Boolean rules** that each represent a condition that is **logically sufficient** to guarantee that the event described by "{{overall_index_question}}" will occur.
 
-Target Event: The event described by "{{overall_index_question}}" within the next 12 months
+Target Event: {{overall_index_question}}
 Analysis Date: {{date}}
 
-Before generating rules, internally define what would constitute the occurrence of this target event.
-This could include scope (e.g., number of regions affected), scale (e.g., measurable magnitude of change), or impact (e.g., economic, environmental, or social significance).
-Use this internal definition consistently when determining which Boolean conditions are sufficient to indicate that the target event would occur.
+Before generating rules, internally define what would constitute the occurrence of this target event (scope, scale, impact). Use this internal definition consistently when evaluating whether a rule guarantees the event.
 
-## CRITICAL REQUIREMENTS:
+---
 
-1. **Variable Names**: Use ONLY the exact market IDs provided in the Available Markets section below
-2. **Sufficient Conditions**: Each rule must represent a condition that is logically sufficient for the target event to occur if true.
-3. **Structure Constraints**:
-   - Use 1-3 distinct market IDs per rule
-   - Maximum nesting depth of 2
-   - AND/OR nodes must have exactly 2-3 children
-   - Leaf nodes must always be "variable" with a "var" key equal to one of the available market IDs.
-4. **Uniqueness**: Avoid rules functionally equivalent to existing ones
-5. **Logical Guarantee**: Each rule must define a condition such that if it is true, then the target event described by "{{overall_index_question}}" would logically follow — independent of other variables.
+# TWO-PHASE GENERATION PROCEDURE (MANDATORY)
 
-## AVAILABLE MARKETS:
+### **Phase 1 — Internal Candidate Generation (not in the final output)**
+Privately brainstorm a large set of possible rules (e.g., 50+).
+Ensure these internal candidates cover **multiple causal mechanisms**, **different types of market signals**, and **different structural forms** (AND/OR/NOT).
 
-Use ONLY these market IDs as variable names in your rules:
+### **Phase 2 — Selection of Final Rules (shown in output)**
+From the internal candidates, select **exactly {{num_of_rules}} rules** that satisfy:
+
+### **1. Logical Guarantee**
+Each final rule must individually *force* or *ensure* the target event, based on the meaning of its markets.
+
+### **2. High Semantic Diversity**
+The selected rules must be **maximally distinct in meaning**, not just in structure.
+You must include rules that differ across:
+
+- Different causal explanations of the target event
+- Different clusters of markets
+- Different combinations of signals (policy, economic, military, scientific, epidemiological, etc.)
+
+### **3. Avoid Redundancy**
+You must remove or merge rules that are:
+
+- trivially equivalent
+- simple negations or permutations
+- relying on the same mechanism with only cosmetic changes
+- overlapping in meaning or predictive basis
+
+
+### **4. Prioritize High-Information Rules**
+Prefer rules that rely on markets with strong direct logical implications for the target event.
+
+### **Never output more than {{num_of_rules}} rules.**
+If you identify more than {{num_of_rules}}, select the {{num_of_rules}} most diverse + strongest.
+
+---
+
+# CRITICAL STRUCTURE REQUIREMENTS
+
+1. **Variable Names**
+   Use ONLY market IDs listed in the Available Markets section.
+
+2. **Rule Structure**
+   - Use 1–3 distinct market IDs per rule
+   - Maximum nesting depth: 2
+   - AND/OR nodes: exactly 2–3 children
+   - NOT nodes: exactly 1 child
+   - Leaf nodes must be `"variable"` with `"var"` equal to an allowed market ID
+
+3. **Functional Uniqueness**
+   All final rules must be meaningfully and logically distinct.
+
+4. **Logical Sufficiency**
+   Each final rule must, if true, logically *guarantee* that the target event will occur.
+
+---
+
+# AVAILABLE MARKETS
+
+Use ONLY these market IDs as variable names:
 
 {% for market_id, market_info in markets.items() %}
 **Market ID:** {{market_id}}
@@ -32,41 +77,38 @@ Use ONLY these market IDs as variable names in your rules:
 ---
 {% endfor %}
 
-## OUTPUT FORMAT
+---
 
-Return a JSON array of rules only. Each rule must include all three required fields:
+# OUTPUT FORMAT (STRICT)
 
-- "reasoning": a string explaining why this rule alone is sufficient for the target event
-- "verbalization": a human-readable string describing this rule
-- "rule": the Boolean logic rule in JSON format
-
-**Each rule must follow exactly this structure:**
+Return a single JSON object:
 
 {
-  "reasoning": "<explain why this rule alone is sufficient>",
-  "verbalization": "<human-readable statement of this rule>",
-  "rule": {
-    "node_type": "<must be one of 'variable', 'not', 'and', 'or'>",
-    "arguments": [ ... ]  // required only if node_type is not "variable"
-  }
+  "content": [
+    {
+      "reasoning": "<string explaining why this rule is sufficient and how it differs from the others>",
+      "verbalization": "<plain English version of the rule>",
+      "rule": {
+        "node_type": "variable|not|and|or",
+        "var": "<market_id>",      (only for variable nodes)
+        "arguments": [ ... ]       (required for not/and/or)
+      }
+    }
+  ]
 }
 
-Allowed node structures:
+### STRICT OUTPUT RULES
+- Output **exactly {{num_of_rules}}** rules
+- No extra keys anywhere
+- Max depth = 2
+- Max 3 unique market IDs per rule
+- Only valid node types
+- Only allowed market IDs
+- Valid JSON, no text before or after
 
-- Variable (leaf):
-  {"node_type": "variable", "var": "<market_id>"}
-- NOT:
-  {"node_type": "not", "arguments": [ <one rule> ]}
-- AND / OR:
-  {"node_type": "and" | "or", "arguments": [ <2 or 3 rules> ]}
+---
 
-IMPORTANT:
+# FINAL INSTRUCTION
 
-- node_type must be exactly "variable", "not", "and", or "or". No other values.
-- Arguments array is required for "not", "and", "or". Do NOT include arguments for "variable".
-- Do NOT include extra spaces in key names. Keys must match exactly: "node_type", "arguments", "var".
-- All fields are required: reasoning, verbalization, rule.
-- Return valid JSON only—do not add extra commas, trailing commas, or text outside the JSON array.
-- Provide only the JSON array. Do NOT include prose or explanations outside the array.
-
-Generate {{num_of_rules}} unique, valid rules now.
+Generate **exactly {{num_of_rules}} logically sufficient, structurally valid, semantically diverse rules now.
+Do not exceed the required number.

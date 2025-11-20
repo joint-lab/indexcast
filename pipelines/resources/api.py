@@ -120,22 +120,23 @@ class ManifoldClient:
             raise ValueError("Limit must be 1000 or less.")
         return self.execute_get_request("bets", params=params)
 
-    def comments(self, market_id: str, limit=1000, before=None) -> list:
+    def comments(self, market_id: str, limit=1000, page=None) -> list:
         """
         Fetch comments for a specific market.
 
         Args:
             market_id (str): The ID of the market.
             limit (int): Number of markets to fetch. Maximum is 1000.
-            before (str, optional): Fetch markets created before this id.
+            page (int, optional): Page number for pagination.
 
         Returns:
             list: A list of comments.
 
         """
         params = {"contractId": market_id, "limit": limit}
-        if before:
-            params["before"] = before
+        if page is not None:
+            params["page"] = page
+
         if limit > 1000:
             raise ValueError("Limit must be 1000 or less.")
         return self.execute_get_request("comments", params=params)

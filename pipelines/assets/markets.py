@@ -19,15 +19,15 @@ from scipy.stats import norm
 from sqlalchemy import delete, func
 from sqlmodel import Session, select
 
-from ml.classification import H5N1Classifier
 from ml.clients import get_client
-from ml.meta_prompting import get_or_create_relevance_prompt
+from ml.dspy_market_scorer import DSPyMarketScorer
+from ml.lm_initial_labeler import get_initial_label, get_initial_labeling_prompt
 from ml.ranker import IndexInformation, get_prompt, get_relevance
 from ml.rules import (
     Formula,
-    Op,
+    OperatorNode,
     PromptInformation,
-    Var,
+    VariableNode,
     extract_literals_from_formula,
     get_rules,
     get_rules_prompt,
@@ -36,7 +36,10 @@ from ml.rules import (
 )
 from models.markets import (
     Index,
+    IndexQuestion,
     IndexRuleLink,
+    LabelInfo,
+    LabelType,
     Market,
     MarketBet,
     MarketComment,
@@ -48,7 +51,6 @@ from models.markets import (
     MarketRule,
     MarketRuleLink,
     PipelineStageType,
-    Prompt,
 )
 from pipelines.resources.db import locked_session
 
@@ -174,8 +176,10 @@ def _prepare_comment(comment_data: dict) -> MarketComment:
         # content
         comment_type=comment_data["commentType"],
         is_api=comment_data.get("isApi", False),
-        content=json.dumps(comment_data["content"]),
-
+        content=json.dumps(
+            comment_data.get("content")
+            or ""
+        ),
         # other info
         visibility=comment_data["visibility"],
         hidden=comment_data.get("hidden", False),
@@ -352,16 +356,17 @@ def manifold_markets(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
         }
     )
 
-
-
-@ dg.asset(
+@dg.asset(
     deps=[manifold_markets],
     required_resource_keys={"database_engine"},
     description="Market labels table."
 )
 def market_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     """Update market labels when materialized."""
+    initial_prompt = get_initial_labeling_prompt()
+    dspy_scorer = DSPyMarketScorer()
     now = datetime.now(UTC)
+    client = get_client()
 
     with Session(context.resources.database_engine) as session:
         # Only process markets that haven't completed the CLASSIFIED stage yet
@@ -371,67 +376,117 @@ def market_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
         markets_to_process = session.exec(
             select(Market).where(Market.id.not_in(subquery))
         ).all()
+        context.log.info(f"Found {len(markets_to_process)} markets needing classification.")
+        results = []
 
-        num_markets_processed = len(markets_to_process)
-        context.log.info(f"Found {num_markets_processed} markets needing classification.")
+        # Label ID map
+        index_question_map = {
+            1: "Will there be a large-scale H5N1 outbreak in humans in the next 12 months?",
+            2: "Will AI systems achieve a new frontier-level milestone within the next 12 months?",
+            3: "Will the total number of people killed in wars and armed conflicts worldwide"
+               " in the next 12 months exceed the average annual deaths over the past five years?",
+            4: "Will the next national election favor the Democratic Party?",
+        }
 
-        # Apply classification logic
-        classification_results = []
-        h5n1_classifier = H5N1Classifier()
         for market in markets_to_process:
-            context.log.debug(f"Processing market: {market.id} - {market.question}")
-            classification_results.append((market.id, h5n1_classifier.predict(market)))
+            context.log.debug(f"Processing market {market.id}")
+            # Must be binary & unresolved
+            if market.outcome_type != "BINARY" or market.resolution is not None:
+                context.log.info(f"Skipping market {market.id}: invalid type/resolved.")
+                continue
 
-        num_markets_h5n1 = sum(1 for _, is_h5n1 in classification_results if is_h5n1)
+            # initial labeler
+            initial_response = get_initial_label(
+                prompt=initial_prompt,
+                market_question=market.question,
+                client=client,
+            )
 
-        # Obtain id of h5n1 label type
-        result = session.exec(
-            select(MarketLabelType).where(MarketLabelType.label_name == "h5n1")
-        ).first()
-        h5n1_label_type_id = result.id
-        context.log.debug(f"Found H5N1 label type ID: {h5n1_label_type_id}")
+            # Store the dump info
+            session.add(LabelInfo(
+                market_id=market.id,
+                type=LabelType.initial,
+                output=json.dumps({
+                    "labels": initial_response.labels,
+                    "reasoning": initial_response.reasoning
+                }),
+            ))
+            labels = initial_response.labels
+            context.log.info(f"Initial labels for {market.id}: {labels}")
 
-        # Update classification results and record pipeline stage
-        for market_id, is_h5n1 in classification_results:
-            # Update labels
-            existing_label = session.exec(
-                select(MarketLabel).where(
-                    (MarketLabel.market_id == market_id) &
-                    (MarketLabel.label_type_id == h5n1_label_type_id)
-                )
-            ).first()
+            # If none-of-the-above, skip DSPy entirely
+            if labels == [-1]:
+                results.append((market.id, [], []))  # No labels or scores
+                continue
 
-            if is_h5n1 and not existing_label:
-                session.add(MarketLabel(market_id=market_id, label_type_id=h5n1_label_type_id))
-            elif not is_h5n1 and existing_label:
-                session.delete(existing_label)
+            market_label_rows = []
+            relevance_rows = []
 
-            # Track that the market completed the CLASSIFIED stage
-            existing_event = session.exec(
-                select(MarketPipelineEvent).where(
-                    (MarketPipelineEvent.market_id == market_id) &
-                    (MarketPipelineEvent.stage_id == PipelineStageType.CLASSIFIED)
-                )
-            ).first()
+            # For each relevant label, run DSPy
+            for label_id in labels:
+                if label_id not in index_question_map:
+                    context.log.warning(f"Unknown label {label_id} for market {market.id}")
+                    continue
 
-            if not existing_event:
-                session.add(
-                    MarketPipelineEvent(
-                        market_id=market_id,
-                        stage_id=PipelineStageType.CLASSIFIED,
-                        completed_at=now
+                index_question = index_question_map[label_id]
+                dspy_out = dspy_scorer.predict(index_question, market.question)
+                # store data from dspy
+                session.add(LabelInfo(
+                    market_id=market.id,
+                    type=LabelType.final,
+                    output=json.dumps({
+                        "rationale": dspy_out["rationale"],
+                        "label": dspy_out["label"],
+                        "score": dspy_out["score"]
+                    }),
+                ))
+
+                # DSPy output format:
+                #   dspy_out = { rationale, label, score }
+                is_relevant = dspy_out["label"].strip() == "1"
+
+                if is_relevant:
+                    # add labels
+                    session.add(
+                        MarketLabel(
+                            market_id=market.id,
+                            label_type_id=label_id,
+                        )
                     )
-                )
+                    # add scores
+                    session.add(
+                        MarketRelevanceScore(
+                            market_id=market.id,
+                            score_type_id=MarketRelevanceScoreType.INDEX_QUESTION_RELEVANCE,
+                            score_value=dspy_out["score"],
+                            chain_of_thoughts=dspy_out["rationale"],
+                            label_id=label_id,
+                        )
+                    )
 
+                relevance_rows.append({
+                    "label_id": label_id,
+                    "dspy_rationale": dspy_out["rationale"],
+                    "dspy_score": dspy_out["score"],
+                    "is_relevant": is_relevant
+                })
+
+            results.append((market.id, market_label_rows, relevance_rows))
+        for market in markets_to_process:
+            # Mark pipeline stage complete
+            session.add(MarketPipelineEvent(
+                market_id=market.id,
+                stage_id=PipelineStageType.CLASSIFIED,
+                completed_at=now
+            ))
         session.commit()
 
     return dg.MaterializeResult(
         metadata={
-            "num_markets_processed": dg.MetadataValue.int(num_markets_processed),
-            "num_markets_h5n1": dg.MetadataValue.int(num_markets_h5n1),
+            "num_markets_processed": dg.MetadataValue.int(len(markets_to_process)),
+            "num_markets_labeled": dg.MetadataValue.int(sum(len(r[1]) for r in results)),
         }
     )
-
 
 @dg.asset(
     deps=[market_labels],
@@ -450,104 +505,117 @@ def manifold_full_markets(context: dg.AssetExecutionContext) -> dg.MaterializeRe
     # Manifold API client
     manifold_client = context.resources.manifold_client
 
-    # get list of market ids that have been labeled H5N1
+    # get list of market ids that have been labeled
     with Session(context.resources.database_engine) as session:
-        h5n1_market_ids = session.exec(
+        # Get all market IDs from all labels
+        all_market_ids = session.exec(
             select(MarketLabel.market_id)
             .join(MarketLabelType, MarketLabel.label_type_id == MarketLabelType.id)
-            .where(MarketLabelType.label_name == "h5n1")
         ).all()
-    context.log.info(f"Found {len(h5n1_market_ids)} h5n1 labeled markets.")
+
+        # Convert to a unique set
+        unique_market_ids = set(all_market_ids)
+
+    context.log.info(f"Found {len(unique_market_ids)} labeled markets.")
+
     total_comments_inserted = 0
     total_bets_updated = 0
 
-    for m in h5n1_market_ids:
-        # get description and text rep of the market
-        full_market = manifold_client.full_market(m)
-        with Session(context.resources.database_engine) as session:
+    with Session(context.resources.database_engine) as session:
+        existing_bets_rows = session.exec(
+            select(MarketBet.id, MarketBet.contract_id, MarketBet.is_filled)
+            .where(MarketBet.contract_id.in_(unique_market_ids))
+        ).all()
+
+        # bucket by market_id
+        bets_by_market = {}
+        for bid, mid, filled in existing_bets_rows:
+            bets_by_market.setdefault(mid, []).append((bid, filled))
+
+        # main loop
+        for m in unique_market_ids:
+
+            # full market data
+            full_market = manifold_client.full_market(m)
+
+            # description
+            description_json = json.dumps(full_market.get("description"))
+
+            # Build a stub Market-like object for get_text_rep
+            temp_market = Market(id=m, description=description_json)
+            text_rep = get_text_rep(temp_market)
+
+            # Market description + text_rep
             market = session.exec(
                 select(Market).where(Market.id == m)
             ).first()
-            market.description = json.dumps(full_market.get("description"))
+            if market:
+                market.description = description_json
+                market.text_rep = text_rep
 
-            text_rep = get_text_rep(market)
-            market.text_rep = text_rep
-            session.commit()
+            # FETCH & REPLACE COMMENTS
+            all_comments = []
+            page = 0
 
-        # comments
-        all_comments = []
-        before = None
-        while True:
-            batch = manifold_client.comments(m, limit=1000, before=before)
-            if not batch:
-                break
-            all_comments.extend(batch)
-            if len(batch) < 1000:
-                break
-            before = batch[-1]["id"]
+            while True:
+                batch = manifold_client.comments(m, limit=1000, page=page)
 
-        # delete old and bulk-insert fresh
-        with Session(context.resources.database_engine) as session:
+                if not batch:
+                    break
+
+                all_comments.extend(batch)
+
+                if len(batch) < 1000:
+                    break
+
+                page += 1
+
             # delete existing comments
             session.exec(
-                delete(MarketComment)
-                .where(MarketComment.market_id == m)
+                delete(MarketComment).where(MarketComment.market_id == m)
             )
-            # prepare & bulk-save new comments
-            objs = [_prepare_comment(cdata) for cdata in all_comments]
+
+            # insert new comments
+            objs = [_prepare_comment(c) for c in all_comments]
             session.bulk_save_objects(objs)
 
-            # commit both delete + insert together
-            session.commit()
-        total_comments_inserted += len(all_comments)
-        context.log.info(
-            f"Market {m}: found {len(all_comments)} comments."
-        )
+            total_comments_inserted += len(all_comments)
+            context.log.info(f"Market {m}: found {len(all_comments)} comments.")
 
+            # FETCH BETS
+            all_bets = []
+            before = None
+            while True:
+                batch = manifold_client.bets(m, limit=1000, before=before)
+                if not batch:
+                    break
+                all_bets.extend(batch)
+                if len(batch) < 1000:
+                    break
+                before = batch[-1]["id"]
 
-        # bets: we want all bets that were unfilled, or are new
-        all_bets= []
-        before = None
-        while True:
-            batch = manifold_client.bets(m, limit=1000, before=before)
-            if not batch:
-                break
-            all_bets.extend(batch)
-            if len(batch) < 1000:
-                break
-            before = batch[-1]["id"]
+            # existing bets for this market
+            existing = bets_by_market.get(m, [])
+            existing_ids = {bid for (bid, filled) in existing}
+            unfilled_ids = [bid for (bid, filled) in existing if not filled]
 
-        with Session(context.resources.database_engine) as session:
-            # get (id, is_filled) for existing bets
-            rows = session.exec(
-                select(MarketBet.id, MarketBet.is_filled)
-                .where(MarketBet.contract_id == m)
-            ).all()
-            existing_ids = {row[0] for row in rows}
-            unfilled_ids = [row[0] for row in rows if not row[1]]
-
-            # delete only the unfilled bets
+            # delete unfilled bets
             if unfilled_ids:
                 session.exec(
-                    delete(MarketBet)
-                    .where(MarketBet.id.in_(unfilled_ids))
+                    delete(MarketBet).where(MarketBet.id.in_(unfilled_ids))
                 )
 
-            # get the bets that aren't in the db
+            # prepare new bets
             to_insert = [
                 _prepare_bet(b)
                 for b in all_bets
                 if b["id"] not in existing_ids
             ]
 
-            # bulk‐insert the new + formerly-unfilled bets
-            session.add_all(to_insert)
-            session.commit()
+            session.bulk_save_objects(to_insert)
+            total_bets_updated += len(all_bets)
 
-        total_bets_updated += len(all_bets)
-
-        # Track FULL_MARKET stage completion
-        with Session(context.resources.database_engine) as session:
+            # TRACK PIPELINE EVENT
             existing_event = session.exec(
                 select(MarketPipelineEvent).where(
                     (MarketPipelineEvent.market_id == m) &
@@ -563,11 +631,13 @@ def manifold_full_markets(context: dg.AssetExecutionContext) -> dg.MaterializeRe
                         completed_at=datetime.now(UTC)
                     )
                 )
-                session.commit()
+
+        # commit everything for all markets
+        session.commit()
 
     return dg.MaterializeResult(
         metadata={
-            "num_markets_processed": dg.MetadataValue.int(len(h5n1_market_ids)),
+            "num_markets_processed": dg.MetadataValue.int(len(unique_market_ids)),
             "total_comments_inserted": dg.MetadataValue.int(total_comments_inserted),
             "total_bets_updated": dg.MetadataValue.int(total_bets_updated),
         }
@@ -589,14 +659,15 @@ def relevance_summary_statistics(context: dg.AssetExecutionContext) -> dg.Materi
     # get list of market ids that have been labeled
     with Session(context.resources.database_engine) as session:
         market_ids = session.exec(select(MarketLabel.market_id)).all()
-    context.log.info(f"Found {len(market_ids)} labeled markets.")
+    unique_market_ids = set(market_ids)
+    context.log.info(f"Found {len(unique_market_ids)} labeled markets.")
 
     # Load all score‐type rows once and build a name id map
     score_type_map = {s.relevance_score: s.value for s in MarketRelevanceScoreType}
     context.log.info(f"Found {len(score_type_map)} relevance label types.")
 
     with locked_session(context.resources.database_engine) as session:
-        for market_id in market_ids:
+        for market_id in unique_market_ids:
             # delete selected score types
             types_to_delete = ["volume_24h", "num_comments", "volume_total",
                                "volume_144h", "num_traders"]
@@ -671,251 +742,42 @@ def relevance_summary_statistics(context: dg.AssetExecutionContext) -> dg.Materi
             }
         )
 
-@dg.asset(
-    deps=[manifold_full_markets],
-    required_resource_keys={"database_engine"},
-    description="Generate meta-prompts for all label types.",
-)
-def relevance_prompts(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
-    """
-    Generate task-specific relevance prompts using meta-prompting.
-    
-    This asset generates optimized relevance evaluation prompts for each
-    index question using the meta-prompt template.
-    """
-    from models.markets import IndexQuestion
-    
-    client = get_client()
-    
-    with Session(context.resources.database_engine) as session:
-        # Get all index questions that need prompts
-        index_questions = session.exec(select(IndexQuestion)).all()
-        
-        if not index_questions:
-            context.log.warning("No index questions found in database.")
-            return dg.MaterializeResult(
-                metadata={
-                    "num_prompts_generated": dg.MetadataValue.int(0),
-                    "num_prompts_existing": dg.MetadataValue.int(0),
-                    "total_index_questions": dg.MetadataValue.int(0),
-                }
-            )
-        
-        prompts_created = 0
-        prompts_existing = 0
-        
-        for index_question in index_questions:
-            prompt_obj = get_or_create_relevance_prompt(
-                session=session,
-                index_question_id=index_question.id,
-                current_date=datetime.now(UTC),
-                client=client,
-                force_regenerate=False,
-            )
-
-            if prompt_obj.created_at >= datetime.now(UTC) - timedelta(seconds=10):
-                prompts_created += 1
-                context.log.info(
-                    f"Generated new prompt for question '{index_question.question}'"
-                )
-            else:
-                prompts_existing += 1
-                context.log.info(
-                    f"Using existing prompt for question '{index_question.question}'"
-                )
-        
-        session.commit()
-    
-    return dg.MaterializeResult(
-        metadata={
-            "num_prompts_generated": dg.MetadataValue.int(prompts_created),
-            "num_prompts_existing": dg.MetadataValue.int(prompts_existing),
-            "total_index_questions": dg.MetadataValue.int(len(index_questions)),
-        }
-    )
-
-
 
 @dg.asset(
-    deps=[relevance_prompts],
+    deps=[relevance_summary_statistics],
     required_resource_keys={"database_engine"},
-    description="Unified relevance scores using meta-generated prompts.",
-)
-def relevance_score(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
-    """
-    Use meta-generated prompts to populate unified relevance scores.
-
-    This asset looks at the labels table and for all labeled markets,
-    it generates relevance scores using the meta-generated prompts
-    stored in the RelevancePrompt table.
-    """
-    client = get_client()
-    
-    from models.markets import IndexQuestion, PromptPurpose
-    
-    # Get list of market ids that have been labeled
-    with Session(context.resources.database_engine) as session:
-        h5n1_result = session.exec(
-            select(MarketLabelType).where(MarketLabelType.label_name == "h5n1")
-        ).first()
-        
-        if not h5n1_result:
-            context.log.warning("No h5n1 label type found.")
-            return dg.MaterializeResult(metadata={})
-        
-        # Get the first index question (hardcoded for H5N1 for now)
-        index_question_obj = session.exec(
-            select(IndexQuestion)
-        ).first()
-        
-        if not index_question_obj:
-            context.log.error("No index question found. Create one first.")
-            return dg.MaterializeResult(metadata={})
-        
-        # Get the meta-generated prompt for this index question
-        relevance_prompt_obj = session.exec(
-            select(Prompt)
-            .where(
-                Prompt.index_question_id == str(index_question_obj.id),
-                Prompt.purpose == PromptPurpose.RELEVANCE
-            )
-            .order_by(Prompt.created_at.desc())
-        ).first()
-        
-        if not relevance_prompt_obj:
-            context.log.error(
-                f"No relevance prompt found for question '{index_question_obj.question}'. "
-                f"Run relevance_prompts asset first."
-            )
-            return dg.MaterializeResult(metadata={})
-        
-        meta_generated_prompt = relevance_prompt_obj.prompt
-        context.log.info(f"Using meta-generated prompt (ID: {relevance_prompt_obj.id})")
-        
-        market_ids = session.exec(
-            select(MarketLabel.market_id).where(
-                MarketLabel.label_type_id == h5n1_result.id
-            )
-        ).all()
-    
-    context.log.info(f"Found {len(market_ids)} labeled markets.")
-    
-    # Use unified INDEX_QUESTION_RELEVANCE instead of separate temporal/geo scores
-    score_type_id = MarketRelevanceScoreType.INDEX_QUESTION_RELEVANCE.value
-    
-    scores_to_add = []
-    market_ids_to_delete = []
-    
-    for market_id in market_ids:
-        with Session(context.resources.database_engine) as session:
-            market = session.exec(
-                select(Market).where(Market.id == market_id)
-            ).first()
-            
-            if not market or not market.text_rep:
-                context.log.warning(f"Market {market_id} missing text representation")
-                continue
-        
-        # Score using meta-generated prompt with Monte Carlo averaging
-        reasonings, scores, average_score = get_relevance(
-            meta_generated_prompt, 
-            market.text_rep, 
-            client
-        )
-        
-        # Collect for batch write
-        scores_to_add.append(MarketRelevanceScore(
-            market_id=market_id,
-            score_type_id=score_type_id,
-            score_value=average_score,
-            chain_of_thoughts=str(reasonings),
-            scores=str(scores),
-        ))
-        market_ids_to_delete.append(market_id)
-        context.log.info(
-            f"Relevance scored for market {market_id}: {average_score:.3f}"
-        )
-    
-    # Batch write to database
-    with locked_session(context.resources.database_engine) as session:
-        # Record pipeline events
-        for m in market_ids_to_delete:
-            existing_event = session.exec(
-                select(MarketPipelineEvent).where(
-                    (MarketPipelineEvent.market_id == m) &
-                    (MarketPipelineEvent.stage_id ==
-                     PipelineStageType.INDEX_QUESTION_RELEVANCE_SCORED)
-                )
-            ).first()
-            
-            if not existing_event:
-                session.add(
-                    MarketPipelineEvent(
-                        market_id=m,
-                        stage_id=PipelineStageType.INDEX_QUESTION_RELEVANCE_SCORED,
-                        completed_at=datetime.now(UTC)
-                    )
-                )
-        
-        # Delete old scores and insert new ones
-        session.exec(
-            delete(MarketRelevanceScore)
-            .where(MarketRelevanceScore.market_id.in_(market_ids_to_delete))
-            .where(MarketRelevanceScore.score_type_id == score_type_id)
-        )
-        session.add_all(scores_to_add)
-        session.commit()
-    
-    context.log.info("All relevance scores updated in DB.")
-    
-    return dg.MaterializeResult(
-        metadata={"num_markets_processed": dg.MetadataValue.int(len(market_ids))}
-    )
-
-
-@dg.asset(
-    deps=[relevance_score, relevance_summary_statistics],
-    required_resource_keys={"database_engine"},
-    description="Market eligibility labels."
+    description="Remove non-eligible index labels per market based on metrics."
 )
 def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
-    """Generate new market rule eligibility labels when materialized."""
-    # Obtain id of h5n1 label type and eligible label type
+    """Update market labels: remove index labels for which a market is not eligible."""
+    index_labels = [
+        "h5n1",
+        "next_national_election_democratic_party",
+        "annual_war_deaths_exceed_average",
+        "ai_frontier_milestone_12mo",
+    ]
+
     with Session(context.resources.database_engine) as session:
-        h5n1_result = session.exec(
-            select(MarketLabelType).where(MarketLabelType.label_name == "h5n1")
-        ).first()
-        rule_eligible_result = session.exec(
-            select(MarketLabelType).where(MarketLabelType.label_name == "rule_eligible")
-        ).first()
+        # Fetch index label types
+        label_types = {
+            label.label_name: label
+            for label in session.exec(
+                select(MarketLabelType).where(MarketLabelType.label_name.in_(index_labels))
+            ).all()
+        }
+        index_label_type_ids = [lt.id for lt in label_types.values()]
 
-        h5n1_label_type_id = h5n1_result.id
-        rule_eligible_label_type_id = rule_eligible_result.id
-
-        # Only process markets that are labeled h5n1
-        markets_to_process = session.exec(
-            select(Market)
-            .outerjoin(MarketLabel, Market.id == MarketLabel.market_id)
-            .where(
-                MarketLabel.label_type_id == h5n1_label_type_id
-            )
+        # Fetch all market labels for these index types
+        market_labels = session.exec(
+            select(MarketLabel).where(MarketLabel.label_type_id.in_(index_label_type_ids))
         ).all()
 
-        num_markets_processed = len(markets_to_process)
-        context.log.info(
-            f"Found {num_markets_processed} h5n1 markets needing eligibility classification."
-        )
+    market_ids = list(set(label.market_id for label in market_labels))
 
-        # Use unified index_question_relevance score (replaces temp/geo/question)
-        question_score_type_id = MarketRelevanceScoreType.INDEX_QUESTION_RELEVANCE.value
-        volume_score_type_id = MarketRelevanceScoreType.VOLUME_TOTAL.value
-
-    # Fetch all relevance scores for these markets
-    market_ids = [m.id for m in markets_to_process]
-    score_type_ids_set = {
-        question_score_type_id,
-        volume_score_type_id,
-    }
+    # Score types
+    question_score_type_id = MarketRelevanceScoreType.INDEX_QUESTION_RELEVANCE.value
+    volume_score_type_id = MarketRelevanceScoreType.VOLUME_TOTAL.value
+    score_type_ids_set = {question_score_type_id, volume_score_type_id}
 
     with Session(context.resources.database_engine) as session:
         all_scores = session.exec(
@@ -926,301 +788,243 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
             )
         ).all()
 
-    # Organize as a lookup table: (market_id, score_type_id) -> score_value
+    # Create a lookup for scores
     score_lookup = {
         (score.market_id, score.score_type_id): score.score_value
         for score in all_scores
     }
 
-    # Apply classification logic
-    classification_results = []
-    # this threshold is determined using calibration city
-    # for manifold volume under 400 mana is not calibrated enough
     volume_threshold = 400
-    num_skipped = 0
-    for m in markets_to_process:
-        with Session(context.resources.database_engine) as session:
-            existing_event = session.exec(
-                select(MarketPipelineEvent).where(
-                    (MarketPipelineEvent.market_id == m.id)
-                    & (MarketPipelineEvent.stage_id == PipelineStageType.RULE_ELIGIBILITY)
-                )
-            ).first()
+    num_labels_removed = 0
 
-            if not existing_event:
-                session.add(MarketPipelineEvent(
-                    market_id=m.id,
-                    stage_id=PipelineStageType.RULE_ELIGIBILITY,
-                    completed_at=datetime.now(UTC),
-                ))
-                session.commit()
-
-    for m in markets_to_process:
-        question_score = score_lookup.get((m.id, question_score_type_id))
-        volume_score = score_lookup.get((m.id, volume_score_type_id))
-
-        if m.outcome_type != "BINARY":
-            context.log.info(f"Market {m.id} is NOT BINARY; marking as not eligible.")
-            classification_results.append((m.id, False))
-            continue
-
-        if volume_score is None:
-            context.log.warning(f"Missing volume score for market {m.id}; skipping classification.")
-            num_skipped += 1
-            continue
-
-        if volume_score < volume_threshold:
-            context.log.info(f"Market {m.id} has low volume ({volume_score}); not eligible.")
-            classification_results.append((m.id, False))
-            continue
-
-        if question_score is None:
-            context.log.warning(f"Missing relevance score for market {m.id}; "
-                                f"skipping classification.")
-            num_skipped += 1
-            continue
-
-        # Simple threshold-based eligibility using unified relevance score
-        # Markets with high relevance (>0.6) and sufficient volume are eligible
-        is_eligible = question_score >= 0.6
-        classification_results.append((m.id, is_eligible))
-
-    num_markets_eligible = sum(1 for _, is_eligible in classification_results if is_eligible)
-
-    # Update classification results in the database
     with Session(context.resources.database_engine) as session:
-        for (market_id, is_eligible) in classification_results:
-            # Update market labels
-            existing_label = session.exec(
-                select(MarketLabel).where(
-                    (MarketLabel.market_id == market_id) &
-                    (MarketLabel.label_type_id == rule_eligible_label_type_id)
-                )
-            ).first()
+        for label in market_labels:
+            m_id = label.market_id
+            question_score = score_lookup.get((m_id, question_score_type_id))
+            volume_score = score_lookup.get((m_id, volume_score_type_id))
 
-            if is_eligible and not existing_label:
-                # Add label if classified as eligible and label does not exist
-                market_label = MarketLabel(
-                    market_id=market_id,
-                    label_type_id=rule_eligible_label_type_id
-                )
-                session.add(market_label)
-            elif not is_eligible and existing_label:
-                # Remove label if not classified as eligible and label exists
-                session.delete(existing_label)
+            # Fetch market outcome type
+            market = session.exec(select(Market).where(Market.id == m_id)).first()
+
+            # Determine eligibility for this label
+            is_eligible = True
+            if market.outcome_type != "BINARY":
+                is_eligible = False
+            elif volume_score is None or volume_score < volume_threshold:
+                is_eligible = False
+            elif question_score is None or question_score < 0.6:
+                is_eligible = False
+
+            if not is_eligible:
+                session.delete(label)
+                num_labels_removed += 1
 
         session.commit()
 
     return dg.MaterializeResult(
         metadata={
-            "num_markets_processed": dg.MetadataValue.int(num_markets_processed),
-            "num_markets_eligible": dg.MetadataValue.int(num_markets_eligible),
-            "num_markets_skipped": dg.MetadataValue.int(num_skipped),
+            "num_labels_checked": dg.MetadataValue.int(len(market_labels)),
+            "num_labels_removed": dg.MetadataValue.int(num_labels_removed),
         }
     )
 
 @dg.asset(
     deps=[market_rule_eligibility_labels],
     required_resource_keys={"database_engine"},
-    description="Rules from eligible markets."
+    description="Generate 30 logical rules per index using LLM."
 )
 def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
-    """Asset to generate and store logical market rules using LLM."""
-    # Load markets that are eligible
+    """Run Monte Carlo simulation to calculate H5N1 outbreak probability."""
     with Session(context.resources.database_engine) as session:
-        rule_eligible_result = session.exec(
-            select(MarketLabelType).where(MarketLabelType.label_name == "rule_eligible")
-        ).first()
-        if not rule_eligible_result:
-            context.log.warning("No rule_eligible label type found.")
-            return dg.MaterializeResult(metadata={})
+        # Load all index questions
+        index_questions = session.exec(select(IndexQuestion)).all()
 
-        rule_eligible_label_type_id = rule_eligible_result.id
+        if not index_questions:
+            context.log.warning("No index questions found.")
+            return dg.MaterializeResult()
 
-        markets_to_process = session.exec(
-            select(Market)
-            .join(MarketLabel, Market.id == MarketLabel.market_id)
-            .where(MarketLabel.label_type_id == rule_eligible_label_type_id)
-        ).all()
-
-        if not markets_to_process:
-            context.log.warning("No eligible markets found.")
-            return dg.MaterializeResult(metadata={})
-
-        last_batch_number = session.exec(
-            select(MarketRule.batch_id).order_by(MarketRule.created_at.desc()).limit(1)
-        ).first()
-
-        if last_batch_number is None:
-            batch_number = 1
-        else:
-            batch_number = last_batch_number + 1
-
-        # Build structured market data for prompt
-        market_data = {}
-        for market in markets_to_process:
-            market_data[market.id] = {
-                "question": market.question,
-                "description": market.description or "",
-                "text_rep": market.text_rep
-            }
-        index_question = ("Will there be a large scale H5N1 outbreak in humans in "
-                          "the next 12 months?")
-        # Prepare prompt with proper context from config
-        prompt_data = PromptInformation(
-            date=datetime.now(UTC),
-            overall_index_question=index_question,
-            num_of_rules=30
-        )
-        
-        context.log.info(f"Generating rules for {len(market_data)} eligible markets")
-        prompt = get_rules_prompt(
-            "rule_gen_prompt.j2", 
-            prompt_data, 
-            market_data
-        )
-
-        # Generate rules using LLM with validation and chunking
         client = get_client()
-        valid_market_ids = set(market_data.keys())
-        
-        logical_rules = get_rules(prompt, valid_market_ids, client)
-        context.log.info(f"Successfully generated {len(logical_rules)} rules")
+        total_rules = 0
+        total_markets_used = 0
 
-        used_markets = []
+        # PROCESS EACH INDEX
+        for index_q in index_questions:
+            index_id = index_q.id
+            context.log.info(f"Processing index: {index_q.question}")
 
-        for rule_obj in logical_rules:
-            rule_json = rule_obj.rule.model_dump_json()
-            readable = stringify_formula(rule_obj.rule, session)
+            # batch number
+            previous_batch = session.exec(
+                select(func.max(MarketRule.batch_id))
+                .where(MarketRule.index_id == index_id)
+            ).one_or_none()
 
-            # Get disease information for prompts from config (already imported above)
-            index_info = IndexInformation(
-                todays_date=datetime.now(UTC),
-                overall_index_question=index_question
+            batch_number = (previous_batch or 0) + 1
+            context.log.info(f"Assigned batch number {batch_number} for index_id={index_id}")
+
+            # Get all markets labeled for this index
+            eligible_markets = session.exec(
+                select(Market)
+                .join(MarketLabel, Market.id == MarketLabel.market_id)
+                .where(MarketLabel.label_type_id == index_id)
+            ).all()
+
+            if not eligible_markets:
+                context.log.info(f"No markets labeled for index {index_q.question}")
+                continue
+
+            context.log.info(f"Found {len(eligible_markets)} markets for index.")
+
+            # Build market dict for prompt
+            market_data = {
+                m.id: {
+                    "question": m.question,
+                    "description": m.description or "",
+                    "text_rep": m.text_rep,
+                }
+                for m in eligible_markets
+            }
+
+            prompt_data = PromptInformation(
+                date=datetime.now(UTC),
+                overall_index_question=index_q.question,
+                num_of_rules=30,
             )
 
-            # Get strength score using rule strength prompt
-            strength_prompt = get_prompt("rule_strength_score_prompt.j2", index_info)
-            client = get_client()
-            strength_reasonings, strength_scores, strength_avg = get_weight(
-                strength_prompt, readable, client
+            prompt = get_rules_prompt("rule_gen_prompt.j2", prompt_data, market_data)
+
+            valid_market_ids = set(market_data.keys())
+
+            # LLM: generate 30 rules
+            logical_rules = get_rules(
+                prompt=prompt,
+                num_rules=30,
+                client=client,
+                allowed_market_ids=valid_market_ids,
+            )
+            context.log.info(f"Generated {len(logical_rules)} rules.")
+
+            used_markets = set()
+
+            # Score and store rules
+            for rule_obj in logical_rules:
+                rule_json = rule_obj.rule.model_dump_json()
+                readable = stringify_formula(rule_obj.rule)
+
+                index_info = IndexInformation(
+                    todays_date=datetime.now(UTC),
+                    overall_index_question=index_q.question,
+                )
+
+                # ---- Strength score ----
+                s_prompt = get_prompt("rule_strength_score_prompt.j2", index_info)
+                s_reasonings, s_scores, s_avg = get_weight(
+                    s_prompt, readable, client
+                )
+
+                # ---- Relevance score ----
+                rule_markets = extract_literals_from_formula(rule_obj.rule)
+                market_metrics = {}
+
+                for mid in rule_markets:
+                    used_markets.add(mid)
+
+                    scores = session.exec(
+                        select(MarketRelevanceScore)
+                        .where(MarketRelevanceScore.market_id == mid)
+                    ).all()
+
+                    market_metrics[mid] = {
+                        sc.score_type.relevance_score: sc.score_value
+                        for sc in scores
+                    }
+
+                metrics_text = f"Rule: {readable}\n\nMarket Metrics:\n"
+                for mid, metrics in market_metrics.items():
+                    m = session.exec(select(Market).where(Market.id == mid)).first()
+                    metrics_text += f"\nMarket {mid}: {m.question}\n"
+                    for k, v in metrics.items():
+                        metrics_text += f"  {k}: {v}\n"
+
+                r_prompt = get_prompt("rule_relevance_score_prompt.j2", index_info)
+                r_reasonings, r_scores, r_avg = get_relevance(
+                    r_prompt, metrics_text, client
+                )
+
+                # ---- Store rule ----
+                new_rule = MarketRule(
+                    rule=rule_json,
+                    readable_rule=readable,
+                    created_at=datetime.now(UTC),
+                    chain_of_thoughts=rule_obj.reasoning,
+                    strength_weight=s_avg,
+                    relevance_weight=r_avg,
+                    strength_chain=str(s_reasonings),
+                    relevance_chain=str(r_reasonings),
+                    strength_scores=str(s_scores),
+                    relevance_scores=str(r_scores),
+                    batch_id=batch_number,
+                    index_id=index_id,
+                )
+                session.add(new_rule)
+                session.flush()
+
+                # ---- Link rule to markets ----
+                for mid in rule_markets:
+                    session.add(MarketRuleLink(market_id=mid, rule_id=new_rule.id))
+
+            session.commit()
+
+            context.log.info(
+                f"Stored {len(logical_rules)} rules for index '{index_q.question}'."
             )
 
-            # Get relevance score - need to collect market metrics for this rule
-            rule_market_ids = extract_literals_from_formula(rule_obj.rule)
-            
-            # Collect all 8 metrics for markets in this rule
-            market_metrics = {}
-            for market_id in rule_market_ids:
-                # Get all relevance scores for this market
-                market_scores = session.exec(
-                    select(MarketRelevanceScore)
-                    .where(MarketRelevanceScore.market_id == market_id)
-                ).all()
-                
-                # Organize scores by type
-                scores_dict = {}
-                for score in market_scores:
-                    score_type_name = score.score_type.relevance_score
-                    scores_dict[score_type_name] = score.score_value
-                
-                market_metrics[market_id] = scores_dict
+            total_rules += len(logical_rules)
+            total_markets_used += len(used_markets)
 
-            # Format market metrics for the relevance prompt
-            metrics_text = f"Rule: {readable}\n\nMarket Metrics:\n"
-            for market_id, metrics in market_metrics.items():
-                market_obj = session.exec(select(Market).where(Market.id == market_id)).first()
-                market_question = market_obj.question if market_obj else "Unknown market"
-                metrics_text += f"\nMarket ID: {market_id}\nQuestion: {market_question}\n"
-                for metric_name, value in metrics.items():
-                    metrics_text += f"  {metric_name}: {value}\n"
-
-            # Get relevance score using rule relevance prompt
-            relevance_prompt = get_prompt("rule_relevance_score_prompt.j2", index_info)
-            relevance_reasonings, relevance_scores, relevance_avg = get_relevance(
-                relevance_prompt, metrics_text, client
-            )
-
-            new_rule = MarketRule(
-                rule=rule_json,
-                readable_rule=readable,
-                created_at=datetime.now(UTC),
-                chain_of_thoughts=rule_obj.reasoning,
-                strength_weight=strength_avg,
-                relevance_weight=relevance_avg,
-                strength_chain=str(strength_reasonings),
-                relevance_chain=str(relevance_reasonings),
-                strength_scores=str(strength_scores),
-                relevance_scores=str(relevance_scores),
-                batch_id=batch_number
-            )
-            session.add(new_rule)
-            session.flush()  # Ensures new_rule.id is available
-            context.log.info(f"Successfully scored new rule: {new_rule}")
-
-            for market_id in rule_market_ids:
-                if market_id not in used_markets:
-                    used_markets.append(market_id)
-
-                # The rule contains actual market IDs, not text representations
-                market_obj = session.exec(
-                    select(Market).where(Market.id == market_id)
-                ).first()
-
-                if market_obj:
-                    new_link = MarketRuleLink(
-                        market_id=market_obj.id,
-                        rule_id=new_rule.id,
-                    )
-                    session.add(new_link)
-                else:
-                    context.log.warning(f"Market not found for ID: {market_id}")
-
-        session.commit()
-
-    context.log.info(f"Generated and stored {len(logical_rules)} market rules.")
-    return dg.MaterializeResult(
-        metadata={
-            "num_rules": dg.MetadataValue.int(len(logical_rules)),
-            "num_markets_used": dg.MetadataValue.int(len(used_markets)),
-        }
-    )
+        return dg.MaterializeResult(
+            metadata={
+                "num_rules": dg.MetadataValue.int(total_rules),
+                "num_markets_used": dg.MetadataValue.int(total_markets_used),
+                "num_indices": dg.MetadataValue.int(len(index_questions)),
+                "batch_id": dg.MetadataValue.int(batch_number),
+            }
+        )
 
 
-def get_market_prob_at_time(session: Session, market_id: str, query_time: datetime) -> float:
+
+def get_market_prob_series(session: Session, market_id: str,
+                           start_date: datetime, end_date: datetime) -> pd.Series:
     """
-    Retrieve the market probability at a specific query time.
+    Retrieve the full probability time series for a market between start_date and end_date.
 
-    Args:
-        session (Session): Active database session used for querying bets.
-        market_id (str): Unique identifier of the market to evaluate.
-        query_time (datetime): Timestamp at which to query the market's probability.
-
-    Returns:
-        float | int:
-            - The 'prob_after' value of the latest bet placed at or before `query_time`.
-            - Returns -1 if no such bet exists.
-            - Returns 1 if the market has resolved to 'yes', or 0 if resolved to 'no'.
-
+    Returns a pandas Series indexed by timestamp (hourly).
     """
     resolution = session.exec(select(Market.resolution).where(Market.id == market_id)).first()
+    time_index = pd.date_range(start=start_date, end=end_date, freq="1h")
 
     if resolution == "YES":
-        return 1.0
+        return pd.Series(1.0, index=time_index)
     elif resolution == "NO":
-        return 0.0
-    else:
-        # Get the most recent bet before or at query_time
-        bet = session.exec(
-            select(MarketBet.prob_after)
-            .where(MarketBet.contract_id == market_id)
-            .where(MarketBet.created_time <= query_time)
-            .order_by(MarketBet.created_time.desc())
-            .limit(1)
-        ).first()
-        # return -1 if no bet as a flag
-        return bet if bet is not None else -1
+        return pd.Series(0.0, index=time_index)
 
+    bets = session.exec(
+        select(MarketBet.created_time, MarketBet.prob_after)
+        .where(MarketBet.contract_id == market_id)
+        .where(MarketBet.created_time <= end_date)
+        .order_by(MarketBet.created_time)
+    ).all()
+
+    if not bets:
+        return pd.Series(-1.0, index=time_index)
+
+    time_index = pd.date_range(start=start_date, end=end_date, freq="1h", tz="UTC")
+
+    df_bets = pd.DataFrame(bets, columns=["created_time", "prob_after"])
+    df_bets["created_time"] = pd.to_datetime(df_bets["created_time"], utc=True)
+    df_bets = df_bets.drop_duplicates(subset="created_time", keep="last").set_index("created_time")
+
+    series = df_bets["prob_after"].reindex(time_index, method="ffill").fillna(-1.0)
+    return series
 
 def eval_formula(formula: Formula, world_row: np.ndarray, market_index_map: dict[str, int]) -> bool:
     """
@@ -1236,12 +1040,12 @@ def eval_formula(formula: Formula, world_row: np.ndarray, market_index_map: dict
 
     """
     # Base case: if the formula is a variable node, look up its value in the world row
-    if isinstance(formula, Var):
-        idx = market_index_map.get(formula.variable_name)
+    if isinstance(formula, VariableNode):
+        idx = market_index_map.get(formula.var)
         return bool(world_row[idx])  # Convert to bool in case it's a float or int
 
     # Recursive case: formula is a logical operation (AND, OR, NOT, etc.)
-    elif isinstance(formula, Op):
+    elif isinstance(formula, OperatorNode):
         # Evaluate all child formulas recursively
         args = [eval_formula(arg, world_row, market_index_map) for arg in formula.arguments]
         op = formula.node_type
@@ -1274,204 +1078,217 @@ def eval_formula(formula: Formula, world_row: np.ndarray, market_index_map: dict
 )
 def index_value(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     """Run Monte Carlo simulation to calculate H5N1 outbreak probability."""
-    from models.markets import IndexQuestion
-    
     # set seed
     np.random.seed(42)
     with (Session(context.resources.database_engine) as session):
-        # Get the index question (hardcoded to first one for H5N1)
-        index_question_obj = session.exec(
-            select(IndexQuestion)
-        ).first()
-        
-        if not index_question_obj:
-            context.log.error("No index question found. Create one first.")
-            return dg.MaterializeResult(metadata={})
-        
-        # get the most recent batch number
-        latest_batch = session.exec(
-            select(MarketRule.batch_id)
-            .order_by(MarketRule.created_at.desc())
-            .limit(1)
-        ).first()
-
-        if latest_batch is None:
-            context.log.warning("No rules found in the database.")
+        index_questions = session.exec(select(IndexQuestion)).all()
+        if not index_questions:
+            context.log.error("No index questions found.")
             return dg.MaterializeResult(metadata={})
 
-        # get all rules with that batch number
-        rules = session.exec(
-            select(MarketRule).where(MarketRule.batch_id == latest_batch)
-        ).all()
+        total_indices = 0
+        index_probabilities = {}
 
-        if not rules:
-            context.log.warning("No rules with weights found for simulation.")
-            return dg.MaterializeResult(metadata={})
+        for index_q in index_questions:
+            context.log.info(f"Running simulation for index question: {index_q.question}")
 
-        # get info from the rules
-        rule_ids = [r.id for r in rules]
-        rule_strength_weights = [r.strength_weight for r in rules]
-        rule_relevance_weights = [r.relevance_weight for r in rules]
-        rule_avg_weights = [
-            (s + r) / 2 for s, r in zip(rule_strength_weights, rule_relevance_weights, strict=False)
-        ]
+            # get all rules tied to this index question
+            rules_for_index = session.exec(
+                select(MarketRule).where(MarketRule.index_id == index_q.id)
+            ).all()
 
-        # Get market links and unique markets from rules
-        market_links_by_rule = {}
-        all_market_ids = set()
-        for rule in rules:
-            market_ids = list(session.exec(
-                select(MarketRuleLink.market_id).where(MarketRuleLink.rule_id == rule.id)
-            ))
-            market_links_by_rule[rule.id] = market_ids
-            all_market_ids.update(market_ids)
-
-        unique_literals = list(all_market_ids)
-
-        # Create index of timestamps
-        end_date = datetime.now(UTC)
-        # use up to 60 days worth of data
-        start_date = end_date - timedelta(days=60)
-        time_index = pd.date_range(start=start_date, end=end_date, freq='1h')
-
-        # Initialize empty DataFrame
-        df_probs = pd.DataFrame(index=time_index, columns=unique_literals, dtype=float)
-
-        # Fill DataFrame using market lookup function
-        for market_id in unique_literals:
-            for timestamp in time_index:
-                prob = get_market_prob_at_time(session, market_id, timestamp)
-                df_probs.at[timestamp, market_id] = prob
-
-        # Gaussian copula correlation matrix
-        # all probs that were not found (ie, that were -1 and NaN)
-        df_probs_clean = df_probs.replace(-1, np.nan)
-        # transform probabilities into a latent Gaussian space
-        # inverse CDF (quantile function) of the standard normal distribution
-        latent_vars = df_probs_clean.apply(norm.ppf)
-        # the Pearson correlation matrix
-        # min_periods=10 so we only compute correlation if there are at least 10
-        # overlapping time points — otherwise it returns NaN.
-        # NaNs in the correlation matrix are replaced with 0,
-        # assuming independence between those pairs
-        corr_df = latent_vars.corr(min_periods=10).fillna(0)
-        corr_matrix = corr_df.values
-
-        # thresholds are equal to the current market prob (most recent prob_after)
-        thresholds_dict = {}
-        for market_id in unique_literals:
-            series = df_probs[market_id].dropna()
-            thresholds_dict[market_id] = series.iloc[-1]
-
-        # sample worlds using copula
-        dim = len(unique_literals)
-        thresholds = np.array([
-            norm.ppf(np.clip(thresholds_dict.get(lit), 1e-6, 1 - 1e-6))
-            for lit in unique_literals
-        ])
-
-        # make sure the matrix is PSD
-        # to sample from a multivariate normal with np.random.multivariate_normal,
-        # we need PSD covariance matrix
-        eps = 1e-3
-        # corr_matrix = eigvecs @ np.diag(eigvals) @ eigvecs.T
-        eigvals, eigvecs = np.linalg.eigh(corr_matrix)
-        # Eigenvalues must be ≥ 0 for the matrix to be PSD
-        eigvals_clipped = np.clip(eigvals, eps, None)
-        # corr_psd = eigvecs @ np.diag(eigvals_clipped) @ eigvecs.T
-        corr_psd = eigvecs @ np.diag(eigvals_clipped) @ eigvecs.T
-
-        # sample 10000 "worlds"
-        z_samples = np.random.multivariate_normal(mean=np.zeros(dim), cov=corr_psd, size=10000)
-        # make markets true or false based on thresholds
-        bool_samples = (z_samples < thresholds).astype(bool)
-
-        # normalize rule weights
-        weights = np.array(rule_avg_weights)
-        norm_weights = weights / weights.sum()
-
-        # set up for evaluating the rules
-        market_index_map = {name: idx for idx, name in enumerate(unique_literals)}
-        n_simulations = bool_samples.shape[0]
-        rule_indicator_matrix = np.zeros((n_simulations, len(rules)))
-
-        # for rule, turn it back into a formula and evaluate it for each world
-        for i, rule in enumerate(rules):
-            try:
-                raw_rule = rule.rule
-                raw_rule = json.loads(raw_rule)
-                adapter = TypeAdapter(Formula)
-                formula = adapter.validate_python(raw_rule)
-            except Exception as e:
-                context.log.warning(f"Failed to parse rule {rule.id}: {e}")
+            if not rules_for_index:
+                context.log.warning(f"No rules found for index question {index_q.id}")
                 continue
 
-            for j in range(n_simulations):
-                world_row = bool_samples[j]
-                try:
-                    rule_result = eval_formula(formula, world_row, market_index_map)
-                    rule_indicator_matrix[j, i] = float(rule_result)
-                except Exception as e:
-                    context.log.warning(f"Error evaluating rule {rule.id} on simulation {j}: {e}")
-
-        # use the weights to score each world for how risky it is
-        scores = rule_indicator_matrix @ norm_weights
-        risk_index = scores.mean()
-
-        # build a json summary of the rules in the sim
-        rules_json = []
-        for rule in rules:
-            rules_json.append({
-                "id": rule.id,
-                "readable_rule": rule.readable_rule,
-                "rule": rule.rule,
-                "strength_weight": rule.strength_weight,
-                "relevance_weight": rule.relevance_weight,
-                "avg_weight": ((rule.strength_weight) + (rule.relevance_weight)) / 2,
-                "chain_of_thoughts": rule.chain_of_thoughts,
-                "strength_scores": json.loads(rule.strength_scores or "[]"),
-                "relevance_scores": json.loads(rule.relevance_scores or "[]"),
-                "strength_chain": rule.strength_chain,
-                "relevance_chain": rule.relevance_chain,
-                "market_ids": [m.id for m in rule.markets]
-            })
-
-        # json rep of the simulation
-        json_rep = {
-            "index_probability": risk_index,
-            "market_ids_in_rules": list(unique_literals),
-            "rules": rules_json
-        }
-
-        # add to the DB
-        new_index = Index(
-            index_probability=float(risk_index),
-            index_question_id=str(index_question_obj.id),
-            created_at=datetime.now(UTC),
-            json_representation=json.dumps(json_rep)
-        )
-        session.add(new_index)
-        session.flush()
-        context.log.info("Added index")
-        for rule_id in rule_ids:
-            # The rule contains actual rules IDs, not text representations
-            rule_obj = session.exec(
-                select(MarketRule).where(MarketRule.id == rule_id)
+            # find the most recent batch among those rules
+            latest_batch = session.exec(
+                select(MarketRule.batch_id)
+                .where(MarketRule.index_id == index_q.id)
+                .order_by(MarketRule.created_at.desc())
+                .limit(1)
             ).first()
 
-            if rule_obj:
-                new_link = IndexRuleLink(
-                    rule_id=rule_obj.id,
-                    index_id=new_index.id,
-                )
-                session.add(new_link)
-            else:
-                context.log.warning(f"Rule not found for ID: {rule_id}")
-        session.commit()
+            if latest_batch is None:
+                context.log.warning(f"No batch found for index question {index_q.id}")
+                continue
+
+            # filter rules to only those in that batch
+            rules = [r for r in rules_for_index if r.batch_id == latest_batch]
+
+            if not rules:
+                context.log.warning(f"No rules in latest batch for index question {index_q.id}")
+                continue
+
+            # proceed with simulation using only these rules
+            rule_ids = [r.id for r in rules]
+            rule_strength_weights = [r.strength_weight for r in rules]
+            rule_relevance_weights = [r.relevance_weight for r in rules]
+            rule_avg_weights = [
+                (s + r) / 2 for s, r in zip(rule_strength_weights,
+                                            rule_relevance_weights, strict=False)
+            ]
+
+            # Get market links and unique markets from rules
+            market_links_by_rule = {}
+            all_market_ids = set()
+            for rule in rules:
+                market_ids = list(session.exec(
+                    select(MarketRuleLink.market_id).where(MarketRuleLink.rule_id == rule.id)
+                ))
+                market_links_by_rule[rule.id] = market_ids
+                all_market_ids.update(market_ids)
+
+            unique_literals = list(all_market_ids)
+
+            # Create index of timestamps
+            end_date = datetime.now(UTC)
+            # use up to 60 days worth of data
+            start_date = end_date - timedelta(days=60)
+            time_index = pd.date_range(start=start_date, end=end_date, freq='1h')
+
+            # Initialize empty DataFrame
+            df_probs = pd.DataFrame(index=time_index, columns=unique_literals, dtype=float)
+
+            # Fill DataFrame using market lookup function
+            for market_id in unique_literals:
+                df_probs[market_id] = get_market_prob_series(session, market_id,
+                                                             start_date, end_date)
+                context.log.info(f"Loaded probability series for market {market_id}")
+
+            # Gaussian copula correlation matrix
+            # all probs that were not found (ie, that were -1 and NaN)
+            df_probs_clean = df_probs.replace(-1, np.nan)
+            # transform probabilities into a latent Gaussian space
+            # inverse CDF (quantile function) of the standard normal distribution
+            latent_vars = df_probs_clean.apply(norm.ppf)
+            # the Pearson correlation matrix
+            # min_periods=10 so we only compute correlation if there are at least 10
+            # overlapping time points — otherwise it returns NaN.
+            # NaNs in the correlation matrix are replaced with 0,
+            # assuming independence between those pairs
+            corr_df = latent_vars.corr(min_periods=10).fillna(0)
+            corr_matrix = corr_df.values
+
+            # thresholds are equal to the current market prob (most recent prob_after)
+            thresholds_dict = {}
+            for market_id in unique_literals:
+                series = df_probs[market_id].dropna()
+                thresholds_dict[market_id] = series.iloc[-1]
+
+            # sample worlds using copula
+            dim = len(unique_literals)
+            thresholds = np.array([
+                norm.ppf(np.clip(thresholds_dict.get(lit), 1e-6, 1 - 1e-6))
+                for lit in unique_literals
+            ])
+
+            # make sure the matrix is PSD
+            # to sample from a multivariate normal with np.random.multivariate_normal,
+            # we need PSD covariance matrix
+            eps = 1e-3
+            # corr_matrix = eigvecs @ np.diag(eigvals) @ eigvecs.T
+            eigvals, eigvecs = np.linalg.eigh(corr_matrix)
+            # Eigenvalues must be ≥ 0 for the matrix to be PSD
+            eigvals_clipped = np.clip(eigvals, eps, None)
+            # corr_psd = eigvecs @ np.diag(eigvals_clipped) @ eigvecs.T
+            corr_psd = eigvecs @ np.diag(eigvals_clipped) @ eigvecs.T
+
+            # sample 10000 "worlds"
+            z_samples = np.random.multivariate_normal(mean=np.zeros(dim), cov=corr_psd, size=10000)
+            # make markets true or false based on thresholds
+            bool_samples = (z_samples < thresholds).astype(bool)
+
+            # normalize rule weights
+            weights = np.array(rule_avg_weights)
+            norm_weights = weights / weights.sum()
+
+            # set up for evaluating the rules
+            market_index_map = {name: idx for idx, name in enumerate(unique_literals)}
+            n_simulations = bool_samples.shape[0]
+            rule_indicator_matrix = np.zeros((n_simulations, len(rules)))
+
+            # for rule, turn it back into a formula and evaluate it for each world
+            for i, rule in enumerate(rules):
+                try:
+                    raw_rule = rule.rule
+                    raw_rule = json.loads(raw_rule)
+                    adapter = TypeAdapter(Formula)
+                    formula = adapter.validate_python(raw_rule)
+                except Exception as e:
+                    context.log.warning(f"Failed to parse rule {rule.id}: {e}")
+                    continue
+
+                for j in range(n_simulations):
+                    world_row = bool_samples[j]
+                    try:
+                        rule_result = eval_formula(formula, world_row, market_index_map)
+                        rule_indicator_matrix[j, i] = float(rule_result)
+                    except Exception as e:
+                        context.log.warning(f"Error evaluating rule {rule.id} on simulation {j}: "
+                                            f"{e}")
+
+            # use the weights to score each world for how risky it is
+            scores = rule_indicator_matrix @ norm_weights
+            risk_index = scores.mean()
+
+            # build a json summary of the rules in the sim
+            rules_json = []
+            for rule in rules:
+                rules_json.append({
+                    "id": rule.id,
+                    "readable_rule": rule.readable_rule,
+                    "rule": rule.rule,
+                    "strength_weight": rule.strength_weight,
+                    "relevance_weight": rule.relevance_weight,
+                    "avg_weight": ((rule.strength_weight) + (rule.relevance_weight)) / 2,
+                    "chain_of_thoughts": rule.chain_of_thoughts,
+                    "strength_scores": json.loads(rule.strength_scores or "[]"),
+                    "relevance_scores": json.loads(rule.relevance_scores or "[]"),
+                    "strength_chain": rule.strength_chain,
+                    "relevance_chain": rule.relevance_chain,
+                    "market_ids": [m.id for m in rule.markets]
+                })
+
+            # json rep of the simulation
+            json_rep = {
+                "index_probability": risk_index,
+                "market_ids_in_rules": list(unique_literals),
+                "rules": rules_json
+            }
+
+            # add to the DB
+            new_index = Index(
+                index_probability=float(risk_index),
+                index_question_id=str(index_q.id),
+                created_at=datetime.now(UTC),
+                json_representation=json.dumps(json_rep)
+            )
+            session.add(new_index)
+            session.flush()
+            context.log.info("Added index")
+            for rule_id in rule_ids:
+                # The rule contains actual rules IDs, not text representations
+                rule_obj = session.exec(
+                    select(MarketRule).where(MarketRule.id == rule_id)
+                ).first()
+
+                if rule_obj:
+                    new_link = IndexRuleLink(
+                        rule_id=rule_obj.id,
+                        index_id=new_index.id,
+                    )
+                    session.add(new_link)
+                else:
+                    context.log.warning(f"Rule not found for ID: {rule_id}")
+
+            index_probabilities[index_q.question] = float(risk_index)
+            total_indices += 1
+            session.commit()
 
         return dg.MaterializeResult(
             metadata={
-                "risk_index": float(risk_index),
-                "num_rules_used": len(rules),
+                "num_indices_generated": dg.MetadataValue.int(total_indices),
+                "index_probabilities": dg.MetadataValue.json(index_probabilities),
             }
         )
