@@ -407,39 +407,3 @@ class IndexQuestion(SQLModel, table=True):
     # Relationships
     # match Index.index_question_rel above
     indices: list["Index"] = Relationship(back_populates="index_question_rel")
-
-    # prompts
-    prompts: list["Prompt"] = Relationship(back_populates="index_question_rel")
-
-
-class PromptPurpose(StrEnum):
-    """Enum for the purposes of a prompt."""
-
-    RELEVANCE = "Relevance"
-    RULE = "Rule"
-
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-# Index prompt
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-class Prompt(SQLModel, table=True):
-    """Meta-generated prompts for relevance or rule gen for an index question."""
-
-    __tablename__ = "prompts"
-
-    id: int = Field(primary_key=True)
-    prompt: str = Field(description="The meta-generated relevance evaluation prompt")
-    purpose: PromptPurpose = Field(
-        description="Purpose of the prompt: 'Relevance' or 'Rule'"
-    )
-
-    # Link to the index question this prompt is for
-    index_question_id: str = Field(
-        foreign_key="index_questions.id",
-        description="The index question this prompt is associated with"
-    )
-
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-
-    # Relationships
-    index_question_rel: "IndexQuestion" = Relationship(back_populates="prompts")
-
