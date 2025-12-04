@@ -380,13 +380,14 @@ def market_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
         results = []
 
         # Label ID map
+        index_questions = session.exec(
+            select(IndexQuestion)
+        ).all()
+
         index_question_map = {
-            1: "Will there be a large-scale H5N1 outbreak in humans in the next 12 months?",
-            2: "Will AI systems achieve a new frontier-level milestone within the next 12 months?",
-            3: "Will the total number of people killed in wars and armed conflicts worldwide"
-               " in the next 12 months exceed the average annual deaths over the past five years?",
-            4: "Will the next national election favor the Democratic Party?",
+            iq.id: iq.question for iq in index_questions
         }
+        context.log.info(f"Loaded {len(index_question_map)} index questions from DB")
 
         for market in markets_to_process:
             context.log.debug(f"Processing market {market.id}")
@@ -463,6 +464,7 @@ def market_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
                             label_id=label_id,
                         )
                     )
+                    market_label_rows.append(label_id)
 
                 relevance_rows.append({
                     "label_id": label_id,
@@ -658,16 +660,18 @@ def relevance_summary_statistics(context: dg.AssetExecutionContext) -> dg.Materi
     """
     # get list of market ids that have been labeled
     with Session(context.resources.database_engine) as session:
-        market_ids = session.exec(select(MarketLabel.market_id)).all()
-    unique_market_ids = set(market_ids)
-    context.log.info(f"Found {len(unique_market_ids)} labeled markets.")
+        labeled_markets = session.exec(
+            select(MarketLabel.market_id, MarketLabel.label_type_id)
+        ).all()
+
+    context.log.info(f"Found {len(labeled_markets)} labeled market/label pairs.")
 
     # Load all score‐type rows once and build a name id map
     score_type_map = {s.relevance_score: s.value for s in MarketRelevanceScoreType}
     context.log.info(f"Found {len(score_type_map)} relevance label types.")
 
     with locked_session(context.resources.database_engine) as session:
-        for market_id in unique_market_ids:
+        for market_id, label_id in labeled_markets:
             # delete selected score types
             types_to_delete = ["volume_24h", "num_comments", "volume_total",
                                "volume_144h", "num_traders"]
@@ -691,6 +695,7 @@ def relevance_summary_statistics(context: dg.AssetExecutionContext) -> dg.Materi
             session.exec(
                 delete(MarketRelevanceScore)
                 .where(MarketRelevanceScore.market_id == market_id)
+                .where(MarketRelevanceScore.label_id == label_id)
                 .where(MarketRelevanceScore.score_type_id.in_(type_ids))
             )
 
@@ -726,6 +731,7 @@ def relevance_summary_statistics(context: dg.AssetExecutionContext) -> dg.Materi
                 to_insert.append(
                     MarketRelevanceScore(
                         market_id=market_id,
+                        label_id=label_id,
                         score_type_id=type_id,
                         score_value=val,
                     )
@@ -738,7 +744,7 @@ def relevance_summary_statistics(context: dg.AssetExecutionContext) -> dg.Materi
 
         return dg.MaterializeResult(
             metadata={
-                "num_markets_processed": dg.MetadataValue.int(len(market_ids))
+                "num_label_pairs_processed": dg.MetadataValue.int(len(labeled_markets))
             }
         )
 
@@ -777,7 +783,9 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
     # Score types
     question_score_type_id = MarketRelevanceScoreType.INDEX_QUESTION_RELEVANCE.value
     volume_score_type_id = MarketRelevanceScoreType.VOLUME_TOTAL.value
-    score_type_ids_set = {question_score_type_id, volume_score_type_id}
+    traders_score_type_id = MarketRelevanceScoreType.NUM_TRADERS.value
+
+    score_type_ids_set = {question_score_type_id, volume_score_type_id, traders_score_type_id}
 
     with Session(context.resources.database_engine) as session:
         all_scores = session.exec(
@@ -794,7 +802,8 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
         for score in all_scores
     }
 
-    volume_threshold = 400
+    volume_threshold = 200
+    traders_threshold = 11
     num_labels_removed = 0
 
     with Session(context.resources.database_engine) as session:
@@ -802,6 +811,7 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
             m_id = label.market_id
             question_score = score_lookup.get((m_id, question_score_type_id))
             volume_score = score_lookup.get((m_id, volume_score_type_id))
+            trades_score = score_lookup.get((m_id, traders_score_type_id))
 
             # Fetch market outcome type
             market = session.exec(select(Market).where(Market.id == m_id)).first()
@@ -811,6 +821,8 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
             if market.outcome_type != "BINARY":
                 is_eligible = False
             elif volume_score is None or volume_score < volume_threshold:
+                is_eligible = False
+            elif trades_score is None or trades_score < traders_threshold:
                 is_eligible = False
             elif question_score is None or question_score < 0.6:
                 is_eligible = False
@@ -1199,9 +1211,18 @@ def index_value(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
             # make markets true or false based on thresholds
             bool_samples = (z_samples < thresholds).astype(bool)
 
-            # normalize rule weights
-            weights = np.array(rule_avg_weights)
-            norm_weights = weights / weights.sum()
+            # normalize rule weights (guard against division by zero)
+            weights = np.array(rule_avg_weights, dtype=float)
+            weight_sum = weights.sum()
+
+            if weight_sum == 0:
+                context.log.warning(
+                    f"All rule weights are zero for index question {index_q.id}. "
+                    "Falling back to uniform weights."
+                )
+                norm_weights = np.ones_like(weights) / len(weights)
+            else:
+                norm_weights = weights / weight_sum
 
             # set up for evaluating the rules
             market_index_map = {name: idx for idx, name in enumerate(unique_literals)}

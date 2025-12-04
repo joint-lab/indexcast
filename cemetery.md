@@ -38,13 +38,6 @@ This file records deprecated, removed, or unused components for historical refer
   Template used to generate prompts for temporal relevance scoring.  
   Removed.
 
-- **meta_prompt.j2**  
-  Template intended for prompt generation dagster asset.  
-  Marked unused.
-- **rules_meta_prompt.j2**  
-  Template intended for generating a prompts for index rules generation.  
-  Marked unused.
-
 ---
 
 ### Tables
@@ -75,11 +68,5 @@ This file records deprecated, removed, or unused components for historical refer
     Developed a multilayer perceptron for eligibility labeling.  
   - `second_classifier.ipynb`  
     Built a secondary classifier for market relevance.  
-
----
-
-### meta_prompting.py
-- Framework for prompting for prompts.  
-- Marked unused.
 
 ---
