@@ -262,7 +262,7 @@ class MarketRelevanceScore(SQLModel, table=True):
     score_type_id: int = Field(primary_key=True)
     score_value: float
     chain_of_thoughts: str | None = None
-    label_id: int = Field(foreign_key="market_label_types.id")
+    label_id: int = Field(primary_key=True, foreign_key="market_label_types.id")
 
     # Relationships
     market: "Market" = Relationship(back_populates="scores")
