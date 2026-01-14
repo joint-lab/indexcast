@@ -1,6 +1,10 @@
 """
 Market assets.
 
+This module contains Dagster assets for fetching, processing, and analyzing
+prediction market data from the Manifold API. It handles market ingestion,
+labeling, scoring, rule generation, and probability calculations.
+
 Authors:
 - JGY <jyoung22@uvm.edu>
 - Erik Arnold <ewarnold@uvm.edu>
@@ -54,9 +58,25 @@ from models.markets import (
 )
 from pipelines.resources.db import locked_session
 
+# =============================================================================
+# Helper Functions - Timestamp Conversion
+# =============================================================================
+
 
 def _safe_fromtimestamp(ms: int) -> datetime | None:
-    """Safely convert milliseconds since epoch to datetime, or return None if out of range."""
+    """
+    Safely convert milliseconds since epoch to datetime.
+
+    Handles edge cases where timestamps are out of the valid datetime range
+    or cause overflow errors.
+
+    Args:
+        ms: Milliseconds since Unix epoch.
+
+    Returns:
+        A timezone-aware datetime object, or None if conversion fails.
+
+    """
     try:
         dt = datetime.fromtimestamp(ms / 1000, UTC)
         if 1 <= dt.year <= 9999:
@@ -66,8 +86,25 @@ def _safe_fromtimestamp(ms: int) -> datetime | None:
         return None
 
 
+# =============================================================================
+# Helper Functions - Data Preparation
+# =============================================================================
+
+
 def _prepare_market(market_data: dict) -> Market:
-    """Prepare a Market object from raw API data."""
+    """
+    Prepare a Market object from raw Manifold API data.
+
+    Converts raw JSON response from the Manifold API into a Market SQLModel
+    object suitable for database insertion.
+
+    Args:
+        market_data: Raw dictionary from Manifold API response.
+
+    Returns:
+        A Market object ready for database insertion.
+
+    """
     # Convert timestamps using safe conversion
     created_time = _safe_fromtimestamp(market_data["createdTime"])
     closed_time = (
@@ -82,6 +119,7 @@ def _prepare_market(market_data: dict) -> Market:
         _safe_fromtimestamp(market_data["lastUpdatedTime"])
         if market_data.get("lastUpdatedTime") else created_time
     )
+
     return Market(
         id=market_data["id"],
         creator_id=market_data.get("creatorId", ""),
@@ -108,7 +146,19 @@ def _prepare_market(market_data: dict) -> Market:
 
 
 def _prepare_bet(bet_data: dict) -> MarketBet:
-    """Prepare a MarketBet object from raw API data."""
+    """
+    Prepare a MarketBet object from raw Manifold API data.
+
+    Converts raw JSON response from the Manifold API into a MarketBet SQLModel
+    object suitable for database insertion.
+
+    Args:
+        bet_data: Raw dictionary from Manifold API response.
+
+    Returns:
+        A MarketBet object ready for database insertion.
+
+    """
     created_time = _safe_fromtimestamp(bet_data["createdTime"])
     updated_time = (
         _safe_fromtimestamp(bet_data["updatedTime"])
@@ -116,46 +166,60 @@ def _prepare_bet(bet_data: dict) -> MarketBet:
     )
 
     return MarketBet(
-        # identifiers
+        # Identifiers
         id=bet_data["id"],
         contract_id=bet_data["contractId"],
         user_id=bet_data["userId"],
         bet_group_id=bet_data.get("betGroupId"),
 
-        # bet info
+        # Bet info
         outcome=bet_data["outcome"],
         amount=bet_data["amount"],
-        order_amount=bet_data.get("orderAmount",0.0),
+        order_amount=bet_data.get("orderAmount", 0.0),
         loan_amount=bet_data.get("loanAmount", 0.0),
         shares=bet_data["shares"],
         fills=json.dumps(bet_data.get("fills")),
 
-        # probabilities
+        # Probabilities
         prob_before=bet_data["probBefore"],
         prob_after=bet_data["probAfter"],
         limit_prob=bet_data.get("limitProb"),
 
-        # status
+        # Status flags
         visibility=bet_data.get("visibility", ""),
         is_api=bet_data.get("isApi", False),
         is_filled=bet_data.get("isFilled", False),
         is_cancelled=bet_data.get("isCancelled", False),
         is_redemption=bet_data.get("isRedemption", False),
 
+        # Timestamps
         created_time=created_time,
         updated_time=updated_time,
 
-        # fees
+        # Fee breakdown
         platform_fee=bet_data.get("fees", {}).get("platformFee", 0.0),
         liquidity_fee=bet_data.get("fees", {}).get("liquidityFee", 0.0),
         creator_fee=bet_data.get("fees", {}).get("creatorFee", 0.0),
 
-        # internal timestamp
+        # Internal tracking
         updated_at=datetime.now(UTC),
     )
 
+
 def _prepare_comment(comment_data: dict) -> MarketComment:
-    """Prepare a MarketComment object from raw API data."""
+    """
+    Prepare a MarketComment object from raw Manifold API data.
+
+    Converts raw JSON response from the Manifold API into a MarketComment
+    SQLModel object suitable for database insertion.
+
+    Args:
+        comment_data: Raw dictionary from Manifold API response.
+
+    Returns:
+        A MarketComment object ready for database insertion.
+
+    """
     created_time = _safe_fromtimestamp(comment_data["createdTime"])
     hidden_time = (
         _safe_fromtimestamp(comment_data["hiddenTime"])
@@ -167,68 +231,91 @@ def _prepare_comment(comment_data: dict) -> MarketComment:
     )
 
     return MarketComment(
-        # identifiers
+        # Identifiers
         id=comment_data["id"],
         market_id=comment_data.get("contractId"),
         user_id=comment_data["userId"],
         reply_to_comment_id=comment_data.get("replyToCommentId"),
 
-        # content
+        # Content
         comment_type=comment_data["commentType"],
         is_api=comment_data.get("isApi", False),
         content=json.dumps(
             comment_data.get("content")
             or ""
         ),
-        # other info
+
+        # Visibility
         visibility=comment_data["visibility"],
         hidden=comment_data.get("hidden", False),
 
-        # timestamps
+        # Timestamps
         created_time=created_time,
         hidden_time=hidden_time,
         edited_time=edited_time,
 
-        # internal timestamp
+        # Internal tracking
         updated_at=datetime.now(UTC),
     )
 
 
+# =============================================================================
+# Helper Functions - Market Metrics
+# =============================================================================
+
+
 def get_volume(session: Session, market_id: str, query_time: datetime) -> float:
     """
-    Retrieve the volume for a given market since the given query time.
+    Retrieve the trading volume for a market since a given time.
+
+    Calculates the sum of absolute bet amounts for a market within the
+    specified time window.
 
     Args:
-        session (Session): SQLAlchemy session used to query the database.
-        market_id (str): Unique identifier for the market to query.
-        query_time (datetime): Timestamp representing the time from which to query.
+        session: SQLAlchemy session used to query the database.
+        market_id: Unique identifier for the market to query.
+        query_time: Start timestamp for the query window.
 
     Returns:
-        float: The `volume` since the given query time.
+        The total trading volume since query_time, or 0.0 if no bets found.
 
     """
     now = datetime.now(UTC)
-    result = session.exec(select(func.sum(func.abs(MarketBet.amount)))
-                          .where(MarketBet.contract_id == market_id).where(
-                          MarketBet.created_time <= now)
-                          .where(MarketBet.created_time >= query_time)).one_or_none()
+    result = session.exec(
+        select(func.sum(func.abs(MarketBet.amount)))
+        .where(MarketBet.contract_id == market_id)
+        .where(MarketBet.created_time <= now)
+        .where(MarketBet.created_time >= query_time)
+    ).one_or_none()
     return result or 0.0
+
+
+# =============================================================================
+# Helper Functions - Text Processing
+# =============================================================================
+
 
 def fetch_text_from_url(
     url: str,
     retries: int = 3,
-    timeout: tuple = (5, 10),  # (connect_timeout, read_timeout)
-    backoff: float = 2,
-    rate_limit_pause: float = 0
+    timeout: tuple = (5, 10),
+    backoff: float = 2
 ) -> str:
     """
-    Fetch LLM-friendly text from r.jina.ai with API key authorization.
+    Fetch LLM-friendly text from a URL using Jina AI's reader service.
 
-    - url: target webpage (e.g. "https://example.com")
-    - retries: number of retry attempts on timeout
-    - timeout: (connect, read) timeouts in seconds
-    - backoff: base seconds to wait (exponential backoff)
-    - rate_limit_pause: optional pause after successful fetch (seconds)
+    Uses r.jina.ai to convert web pages into clean, readable text suitable
+    for language model processing. Implements exponential backoff for retries.
+
+    Args:
+        url: Target webpage URL (e.g., "https://example.com").
+        retries: Number of retry attempts on timeout.
+        timeout: Tuple of (connect_timeout, read_timeout) in seconds.
+        backoff: Base seconds to wait between retries (exponential).
+
+    Returns:
+        The extracted text content, or an error message string on failure.
+
     """
     endpoint = f"https://r.jina.ai/{url}"
 
@@ -236,8 +323,6 @@ def fetch_text_from_url(
         try:
             resp = requests.get(endpoint, timeout=timeout)
             resp.raise_for_status()
-            if rate_limit_pause:
-                time.sleep(rate_limit_pause)
             return resp.text
 
         except requests.exceptions.ReadTimeout:
@@ -252,38 +337,51 @@ def fetch_text_from_url(
 
     return "Error: failed after multiple retries"
 
+
 def extract_urls(text: str) -> list[str]:
     """
-    Find all HTTP/HTTPS URLs in the given text.
+    Extract all HTTP/HTTPS URLs from a text string.
 
-    Returns a list of matching URL strings.
+    Uses regex pattern matching to find URL strings in the given text.
+
+    Args:
+        text: Input text to search for URLs.
+
+    Returns:
+        A list of URL strings found in the text.
+
     """
-    # Regex pattern to match most http(s) URLs
     url_pattern = r'(https?://[^\s]+)'
     return re.findall(url_pattern, text)
 
+
 def get_text_rep(market: Market) -> str:
     """
-    Create a text representation of the given market.
+    Create a text representation of a market for LLM processing.
 
-    Returns a string representation of the given market.
+    Builds a structured text representation including the market title,
+    description, and optionally fetched content from URLs in the description.
+
+    Args:
+        market: Market object to create text representation for.
+
+    Returns:
+        A formatted string containing the market's text representation.
+
     """
-    # Extract the title and description
     title = market.question
-    # make sure the description is not too long
+    # Limit description length to avoid token overflow
     description = market.description[:4875]
 
-    # if there are urls in the description, might need them to add context
+    # Fetch content from URLs in the description for additional context
     urls = extract_urls(market.description)
     url_text = ""
     if len(urls) > 0:
         for url in urls:
             url_text += fetch_text_from_url(url)
 
-    # build text rep
-    # make sure there were urls and fetching the contents did not result in an error
+    # Build text representation with or without URL content
     if len(url_text) > 0 and "error" not in url_text[:20].lower():
-        # trim for now to make sure not too many tokens
         trimmed = url_text[:4875]
         text_rep = f"""<Title>{title}</Title>
         <Description>{description}</Description> 
@@ -292,6 +390,12 @@ def get_text_rep(market: Market) -> str:
         text_rep = f"""<Title>{title}</Title>
         <Description>{description}</Description>"""
     return text_rep
+
+
+# =============================================================================
+# Dagster Assets - Market Ingestion
+# =============================================================================
+
 
 @dg.asset(
     required_resource_keys={"database_engine", "manifold_client"},
@@ -310,10 +414,10 @@ def manifold_markets(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     total_fetched = 0
     batch_num = 0
 
-    # Manifold API client
+    # Get Manifold API client from resources
     manifold_client = context.resources.manifold_client
 
-    # Fetch markets in batches
+    # Fetch markets in batches until we hit existing markets
     with Session(context.resources.database_engine) as session:
         stop_fetching = False
         while not stop_fetching:
@@ -325,36 +429,54 @@ def manifold_markets(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
                 f"Fetched batch {batch_num}: {batch_size} markets "
                 f"(total fetched: {total_fetched})"
             )
+
             if not batch:
                 break
+
             for i, m in enumerate(batch):
-                if session.get(Market, m["id"]):  # Stop if market already exists
-                    context.log.debug(f"Market {m['id']} already exists in DB. Stopping fetch.")
+                # Stop if we encounter an existing market
+                if session.get(Market, m["id"]):
+                    context.log.debug(
+                        f"Market {m['id']} already exists in DB. Stopping fetch."
+                    )
                     stop_fetching = True
                     break
+
                 market = _prepare_market(m)
                 session.add(market)
                 new_markets.append(market)
+
                 if (i + 1) % 100 == 0:
                     context.log.debug(
                         f"Processed {i + 1} markets in current batch."
                     )
+
             session.commit()
             context.log.debug(
                 f"Committed batch {batch_num} to DB. "
                 f"New markets so far: {len(new_markets)}."
             )
+
             if stop_fetching or len(batch) < 1000:
                 break
             before = batch[-1]["id"]
+
     context.log.info(
-        f"Inserted {len(new_markets)} new markets from Manifold (fetched {total_fetched} total)"
+        f"Inserted {len(new_markets)} new markets from Manifold "
+        f"(fetched {total_fetched} total)"
     )
+
     return dg.MaterializeResult(
         metadata={
             "num_markets_inserted": dg.MetadataValue.int(len(new_markets)),
         }
     )
+
+
+# =============================================================================
+# Dagster Assets - Market Classification
+# =============================================================================
+
 
 @dg.asset(
     deps=[manifold_markets],
@@ -362,24 +484,36 @@ def manifold_markets(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     description="Market labels table."
 )
 def market_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
-    """Update market labels when materialized."""
+    """
+    Classify markets and assign relevance labels using LLM-based scoring.
+
+    This asset processes unclassified markets through a two-stage labeling pipeline:
+    1. Initial labeling using a prompt-based classifier to identify potentially relevant markets
+    2. DSPy-based scoring to determine final relevance for each index question
+
+    Markets are labeled with index question IDs if they pass both stages, and
+    relevance scores are stored for further processing.
+    """
     initial_prompt = get_initial_labeling_prompt()
     dspy_scorer = DSPyMarketScorer()
     now = datetime.now(UTC)
     client = get_client()
 
     with Session(context.resources.database_engine) as session:
-        # Only process markets that haven't completed the CLASSIFIED stage yet
+        # Find markets needing classification
         subquery = select(MarketPipelineEvent.market_id).where(
             MarketPipelineEvent.stage_id == PipelineStageType.CLASSIFIED
         )
         markets_to_process = session.exec(
             select(Market).where(Market.id.not_in(subquery))
         ).all()
-        context.log.info(f"Found {len(markets_to_process)} markets needing classification.")
+        context.log.info(
+            f"Found {len(markets_to_process)} markets needing classification."
+        )
+
         results = []
 
-        # Label ID map
+        # Load index question mapping
         index_questions = session.exec(
             select(IndexQuestion)
         ).all()
@@ -387,23 +521,29 @@ def market_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
         index_question_map = {
             iq.id: iq.question for iq in index_questions
         }
-        context.log.info(f"Loaded {len(index_question_map)} index questions from DB")
+        context.log.info(
+            f"Loaded {len(index_question_map)} index questions from DB"
+        )
 
+        # Process each market
         for market in markets_to_process:
             context.log.debug(f"Processing market {market.id}")
-            # Must be binary & unresolved
+
+            # Skip non-binary or resolved markets
             if market.outcome_type != "BINARY" or market.resolution is not None:
-                context.log.info(f"Skipping market {market.id}: invalid type/resolved.")
+                context.log.info(
+                    f"Skipping market {market.id}: invalid type/resolved."
+                )
                 continue
 
-            # initial labeler
+            # Initial labeling
             initial_response = get_initial_label(
                 prompt=initial_prompt,
                 market_question=market.question,
                 client=client,
             )
 
-            # Store the dump info
+            # Store initial label info for debugging/auditing
             session.add(LabelInfo(
                 market_id=market.id,
                 type=LabelType.initial,
@@ -415,23 +555,25 @@ def market_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
             labels = initial_response.labels
             context.log.info(f"Initial labels for {market.id}: {labels}")
 
-            # If none-of-the-above, skip DSPy entirely
+            # Skip DSPy if none-of-the-above
             if labels == [-1]:
-                results.append((market.id, [], []))  # No labels or scores
+                results.append((market.id, [], []))
                 continue
 
             market_label_rows = []
-            relevance_rows = []
 
-            # For each relevant label, run DSPy
+            # DSPy scoring for each relevant label
             for label_id in labels:
                 if label_id not in index_question_map:
-                    context.log.warning(f"Unknown label {label_id} for market {market.id}")
+                    context.log.warning(
+                        f"Unknown label {label_id} for market {market.id}"
+                    )
                     continue
 
                 index_question = index_question_map[label_id]
                 dspy_out = dspy_scorer.predict(index_question, market.question)
-                # store data from dspy
+
+                # Store DSPy output for auditing
                 session.add(LabelInfo(
                     market_id=market.id,
                     type=LabelType.final,
@@ -442,19 +584,17 @@ def market_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
                     }),
                 ))
 
-                # DSPy output format:
-                #   dspy_out = { rationale, label, score }
                 is_relevant = dspy_out["label"].strip() == "1"
 
                 if is_relevant:
-                    # add labels
+                    # Add market label
                     session.add(
                         MarketLabel(
                             market_id=market.id,
                             label_type_id=label_id,
                         )
                     )
-                    # add scores
+                    # Add relevance score
                     session.add(
                         MarketRelevanceScore(
                             market_id=market.id,
@@ -466,29 +606,32 @@ def market_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
                     )
                     market_label_rows.append(label_id)
 
-                relevance_rows.append({
-                    "label_id": label_id,
-                    "dspy_rationale": dspy_out["rationale"],
-                    "dspy_score": dspy_out["score"],
-                    "is_relevant": is_relevant
-                })
+            results.append((market.id, market_label_rows))
 
-            results.append((market.id, market_label_rows, relevance_rows))
+        # Mark all processed markets as classified
         for market in markets_to_process:
-            # Mark pipeline stage complete
             session.add(MarketPipelineEvent(
                 market_id=market.id,
                 stage_id=PipelineStageType.CLASSIFIED,
                 completed_at=now
             ))
+
         session.commit()
 
     return dg.MaterializeResult(
         metadata={
             "num_markets_processed": dg.MetadataValue.int(len(markets_to_process)),
-            "num_markets_labeled": dg.MetadataValue.int(sum(len(r[1]) for r in results)),
+            "num_markets_labeled": dg.MetadataValue.int(
+                sum(len(r[1]) for r in results)
+            ),
         }
     )
+
+
+# =============================================================================
+# Dagster Assets - Full Market Data
+# =============================================================================
+
 
 @dg.asset(
     deps=[market_labels],
@@ -497,25 +640,25 @@ def market_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
 )
 def manifold_full_markets(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     """
-    Fetch the latest bets and comments from the Manifold API and populates the market_bets table.
+    Fetch complete market data including bets, comments, and descriptions.
 
-    This asset looks at the labels table, fetches all bets, comments and the descriptions
-    from the Manifold API for those markets. It inserts new bets and overwites all comments and
-    the description fresh each time.It also respects the Manifold API rate limits and
-    handles pagination.
+    This asset enriches labeled markets with full data from the Manifold API:
+    - Fetches and stores all bets with pagination handling
+    - Replaces existing comments with fresh data
+    - Updates market descriptions and generates text representations
+
+    The asset respects API rate limits and handles pagination for large datasets.
+    Bets are upserted (unfilled bets replaced, new bets inserted) while comments
+    are fully replaced on each run.
     """
-    # Manifold API client
     manifold_client = context.resources.manifold_client
 
-    # get list of market ids that have been labeled
+    # Get all labeled market IDs
     with Session(context.resources.database_engine) as session:
-        # Get all market IDs from all labels
         all_market_ids = session.exec(
             select(MarketLabel.market_id)
             .join(MarketLabelType, MarketLabel.label_type_id == MarketLabelType.id)
         ).all()
-
-        # Convert to a unique set
         unique_market_ids = set(all_market_ids)
 
     context.log.info(f"Found {len(unique_market_ids)} labeled markets.")
@@ -524,30 +667,27 @@ def manifold_full_markets(context: dg.AssetExecutionContext) -> dg.MaterializeRe
     total_bets_updated = 0
 
     with Session(context.resources.database_engine) as session:
+        # Pre-fetch existing bets for efficiency
         existing_bets_rows = session.exec(
             select(MarketBet.id, MarketBet.contract_id, MarketBet.is_filled)
             .where(MarketBet.contract_id.in_(unique_market_ids))
         ).all()
 
-        # bucket by market_id
+        # Bucket bets by market ID for quick lookup
         bets_by_market = {}
         for bid, mid, filled in existing_bets_rows:
             bets_by_market.setdefault(mid, []).append((bid, filled))
 
-        # main loop
+        # Process each market
         for m in unique_market_ids:
-
-            # full market data
+            # Fetch full market data from API
             full_market = manifold_client.full_market(m)
-
-            # description
             description_json = json.dumps(full_market.get("description"))
 
-            # Build a stub Market-like object for get_text_rep
             temp_market = Market(id=m, description=description_json)
             text_rep = get_text_rep(temp_market)
 
-            # Market description + text_rep
+            # Update market with description and text representation
             market = session.exec(
                 select(Market).where(Market.id == m)
             ).first()
@@ -555,38 +695,33 @@ def manifold_full_markets(context: dg.AssetExecutionContext) -> dg.MaterializeRe
                 market.description = description_json
                 market.text_rep = text_rep
 
-            # FETCH & REPLACE COMMENTS
+            # Fetch and replace comments
             all_comments = []
             page = 0
 
             while True:
                 batch = manifold_client.comments(m, limit=1000, page=page)
-
                 if not batch:
                     break
-
                 all_comments.extend(batch)
-
                 if len(batch) < 1000:
                     break
-
                 page += 1
 
-            # delete existing comments
+            # Delete existing comments and insert fresh data
             session.exec(
                 delete(MarketComment).where(MarketComment.market_id == m)
             )
-
-            # insert new comments
             objs = [_prepare_comment(c) for c in all_comments]
             session.bulk_save_objects(objs)
 
             total_comments_inserted += len(all_comments)
             context.log.info(f"Market {m}: found {len(all_comments)} comments.")
 
-            # FETCH BETS
+            # Fetch bets with pagination
             all_bets = []
             before = None
+
             while True:
                 batch = manifold_client.bets(m, limit=1000, before=before)
                 if not batch:
@@ -596,28 +731,27 @@ def manifold_full_markets(context: dg.AssetExecutionContext) -> dg.MaterializeRe
                     break
                 before = batch[-1]["id"]
 
-            # existing bets for this market
+            # Get existing bet IDs for this market
             existing = bets_by_market.get(m, [])
             existing_ids = {bid for (bid, filled) in existing}
             unfilled_ids = [bid for (bid, filled) in existing if not filled]
 
-            # delete unfilled bets
+            # Delete unfilled bets (they may have been updated)
             if unfilled_ids:
                 session.exec(
                     delete(MarketBet).where(MarketBet.id.in_(unfilled_ids))
                 )
 
-            # prepare new bets
+            # Insert only new bets
             to_insert = [
                 _prepare_bet(b)
                 for b in all_bets
                 if b["id"] not in existing_ids
             ]
-
             session.bulk_save_objects(to_insert)
             total_bets_updated += len(all_bets)
 
-            # TRACK PIPELINE EVENT
+            # Track pipeline event
             existing_event = session.exec(
                 select(MarketPipelineEvent).where(
                     (MarketPipelineEvent.market_id == m) &
@@ -634,7 +768,6 @@ def manifold_full_markets(context: dg.AssetExecutionContext) -> dg.MaterializeRe
                     )
                 )
 
-        # commit everything for all markets
         session.commit()
 
     return dg.MaterializeResult(
@@ -646,6 +779,11 @@ def manifold_full_markets(context: dg.AssetExecutionContext) -> dg.MaterializeRe
     )
 
 
+# =============================================================================
+# Dagster Assets - Relevance Scoring
+# =============================================================================
+
+
 @dg.asset(
     deps=[manifold_full_markets],
     required_resource_keys={"database_engine"},
@@ -653,12 +791,20 @@ def manifold_full_markets(context: dg.AssetExecutionContext) -> dg.MaterializeRe
 )
 def relevance_summary_statistics(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     """
-    Use bets and comments tables to populate relevance_scores table.
+    Calculate and store relevance summary statistics for labeled markets.
 
-    This asset looks at the labels table and for all labeled markets, it generates 5 relevance
-    scores and stores them in the database.
+    This asset computes market activity metrics that indicate relevance and
+    reliability:
+    - volume_total: Total trading volume
+    - volume_24h: Trading volume in the last 24 hours
+    - volume_144h: Trading volume in the last 144 hours (6 days)
+    - num_traders: Number of unique traders
+    - num_comments: Number of comments on the market
+
+    These scores are stored per market-label pair and used for eligibility
+    filtering in downstream assets.
     """
-    # get list of market ids that have been labeled
+    # Get all labeled market-label pairs
     with Session(context.resources.database_engine) as session:
         labeled_markets = session.exec(
             select(MarketLabel.market_id, MarketLabel.label_type_id)
@@ -666,16 +812,23 @@ def relevance_summary_statistics(context: dg.AssetExecutionContext) -> dg.Materi
 
     context.log.info(f"Found {len(labeled_markets)} labeled market/label pairs.")
 
-    # Load all score‐type rows once and build a name id map
+    # Build score type name-to-ID mapping
     score_type_map = {s.relevance_score: s.value for s in MarketRelevanceScoreType}
     context.log.info(f"Found {len(score_type_map)} relevance label types.")
 
     with locked_session(context.resources.database_engine) as session:
         for market_id, label_id in labeled_markets:
-            # delete selected score types
-            types_to_delete = ["volume_24h", "num_comments", "volume_total",
-                               "volume_144h", "num_traders"]
-            type_ids = [score_type_map[name] for name in types_to_delete if name in score_type_map]
+            # Define which score types to replace
+            types_to_delete = [
+                "volume_24h", "num_comments", "volume_total",
+                "volume_144h", "num_traders"
+            ]
+            type_ids = [
+                score_type_map[name]
+                for name in types_to_delete
+                if name in score_type_map
+            ]
+
             existing_event = session.exec(
                 select(MarketPipelineEvent).where(
                     (MarketPipelineEvent.market_id == market_id) &
@@ -692,6 +845,8 @@ def relevance_summary_statistics(context: dg.AssetExecutionContext) -> dg.Materi
                         completed_at=datetime.now(UTC)
                     )
                 )
+
+            # Delete existing scores of these types for this market-label pair
             session.exec(
                 delete(MarketRelevanceScore)
                 .where(MarketRelevanceScore.market_id == market_id)
@@ -699,23 +854,26 @@ def relevance_summary_statistics(context: dg.AssetExecutionContext) -> dg.Materi
                 .where(MarketRelevanceScore.score_type_id.in_(type_ids))
             )
 
-            # volume_total
+            # Calculate metrics
             volume_total = get_volume(session, market_id, datetime.min)
+            volume_24h = get_volume(
+                session, market_id, datetime.now(UTC) - timedelta(hours=24)
+            )
+            volume_144h = get_volume(
+                session, market_id, datetime.now(UTC) - timedelta(hours=144)
+            )
 
-            # volume_24h
-            volume_24h = get_volume(session, market_id, datetime.now(UTC) - timedelta(hours=24))
+            num_traders = session.exec(
+                select(func.count(func.distinct(MarketBet.user_id)))
+                .where(MarketBet.contract_id == market_id)
+            ).one_or_none() or 0
 
-            # volume_144h
-            volume_144h = get_volume(session, market_id, datetime.now(UTC) - timedelta(hours=144))
+            num_comments = session.exec(
+                select(func.count())
+                .where(MarketComment.market_id == market_id)
+            ).one_or_none() or 0
 
-            # num_traders
-            num_traders = session.exec(select(func.count(func.distinct(MarketBet.user_id)))
-                .where(MarketBet.contract_id == market_id)).one_or_none() or 0
-
-            # num_comments
-            num_comments = session.exec(select(func.count())
-                .where(MarketComment.market_id == market_id)).one_or_none() or 0
-
+            # Insert new scores
             to_insert = []
             for name, val in [
                 ("volume_total", volume_total),
@@ -739,7 +897,6 @@ def relevance_summary_statistics(context: dg.AssetExecutionContext) -> dg.Materi
 
             session.add_all(to_insert)
             context.log.info(f"Scored market: {market_id}.")
-
             session.commit()
 
         return dg.MaterializeResult(
@@ -749,13 +906,31 @@ def relevance_summary_statistics(context: dg.AssetExecutionContext) -> dg.Materi
         )
 
 
+# =============================================================================
+# Dagster Assets - Eligibility Filtering
+# =============================================================================
+
+
 @dg.asset(
     deps=[relevance_summary_statistics],
     required_resource_keys={"database_engine"},
     description="Remove non-eligible index labels per market based on metrics."
 )
 def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
-    """Update market labels: remove index labels for which a market is not eligible."""
+    """
+    Filter market labels based on eligibility criteria.
+
+    This asset removes market-label associations for markets that don't meet
+    minimum quality thresholds:
+    - Must be a BINARY outcome type
+    - Must have volume >= 200
+    - Must have >= 11 unique traders
+    - Must have question relevance score >= 0.6
+
+    Labels that don't meet these criteria are removed to ensure only high-quality
+    markets are used in rule generation.
+    """
+    # Index labels to check for eligibility
     index_labels = [
         "h5n1",
         "next_national_election_democratic_party",
@@ -768,25 +943,31 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
         label_types = {
             label.label_name: label
             for label in session.exec(
-                select(MarketLabelType).where(MarketLabelType.label_name.in_(index_labels))
+                select(MarketLabelType).where(
+                    MarketLabelType.label_name.in_(index_labels)
+                )
             ).all()
         }
         index_label_type_ids = [lt.id for lt in label_types.values()]
 
         # Fetch all market labels for these index types
         market_labels = session.exec(
-            select(MarketLabel).where(MarketLabel.label_type_id.in_(index_label_type_ids))
+            select(MarketLabel).where(
+                MarketLabel.label_type_id.in_(index_label_type_ids)
+            )
         ).all()
 
     market_ids = list(set(label.market_id for label in market_labels))
 
-    # Score types
+    # Score type IDs for eligibility checks
     question_score_type_id = MarketRelevanceScoreType.INDEX_QUESTION_RELEVANCE.value
     volume_score_type_id = MarketRelevanceScoreType.VOLUME_TOTAL.value
     traders_score_type_id = MarketRelevanceScoreType.NUM_TRADERS.value
+    score_type_ids_set = {
+        question_score_type_id, volume_score_type_id, traders_score_type_id
+    }
 
-    score_type_ids_set = {question_score_type_id, volume_score_type_id, traders_score_type_id}
-
+    # Fetch all relevant scores
     with Session(context.resources.database_engine) as session:
         all_scores = session.exec(
             select(MarketRelevanceScore)
@@ -796,12 +977,13 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
             )
         ).all()
 
-    # Create a lookup for scores
+    # Build score lookup for efficient access
     score_lookup = {
         (score.market_id, score.score_type_id): score.score_value
         for score in all_scores
     }
 
+    # Eligibility thresholds
     volume_threshold = 200
     traders_threshold = 11
     num_labels_removed = 0
@@ -814,9 +996,11 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
             trades_score = score_lookup.get((m_id, traders_score_type_id))
 
             # Fetch market outcome type
-            market = session.exec(select(Market).where(Market.id == m_id)).first()
+            market = session.exec(
+                select(Market).where(Market.id == m_id)
+            ).first()
 
-            # Determine eligibility for this label
+            # Check eligibility criteria
             is_eligible = True
             if market.outcome_type != "BINARY":
                 is_eligible = False
@@ -840,13 +1024,31 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
         }
     )
 
+
+# =============================================================================
+# Dagster Assets - Rule Generation
+# =============================================================================
+
+
 @dg.asset(
     deps=[market_rule_eligibility_labels],
     required_resource_keys={"database_engine"},
     description="Generate 30 logical rules per index using LLM."
 )
 def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
-    """Run Monte Carlo simulation to calculate H5N1 outbreak probability."""
+    """
+    Generate logical rules for each index question using LLM.
+
+    This asset creates Boolean logical rules that combine multiple prediction
+    markets to infer the probability of index events. For each index question:
+    1. Fetches all eligible markets labeled for that index
+    2. Generates 30 logical rules using an LLM
+    3. Scores each rule for strength and relevance
+    4. Stores rules and links to constituent markets
+
+    Rules are stored with chain-of-thought reasoning and scored using separate
+    strength and relevance prompts.
+    """
     with Session(context.resources.database_engine) as session:
         # Load all index questions
         index_questions = session.exec(select(IndexQuestion)).all()
@@ -858,22 +1060,24 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
         client = get_client()
         total_rules = 0
         total_markets_used = 0
+        batch_number = 0
 
-        # PROCESS EACH INDEX
+        # Process each index question
         for index_q in index_questions:
             index_id = index_q.id
             context.log.info(f"Processing index: {index_q.question}")
 
-            # batch number
+            # Determine batch number for this index
             previous_batch = session.exec(
                 select(func.max(MarketRule.batch_id))
                 .where(MarketRule.index_id == index_id)
             ).one_or_none()
-
             batch_number = (previous_batch or 0) + 1
-            context.log.info(f"Assigned batch number {batch_number} for index_id={index_id}")
+            context.log.info(
+                f"Assigned batch number {batch_number} for index_id={index_id}"
+            )
 
-            # Get all markets labeled for this index
+            # Get all eligible markets for this index
             eligible_markets = session.exec(
                 select(Market)
                 .join(MarketLabel, Market.id == MarketLabel.market_id)
@@ -881,12 +1085,14 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
             ).all()
 
             if not eligible_markets:
-                context.log.info(f"No markets labeled for index {index_q.question}")
+                context.log.info(
+                    f"No markets labeled for index {index_q.question}"
+                )
                 continue
 
             context.log.info(f"Found {len(eligible_markets)} markets for index.")
 
-            # Build market dict for prompt
+            # Build market data for prompt
             market_data = {
                 m.id: {
                     "question": m.question,
@@ -901,12 +1107,10 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
                 overall_index_question=index_q.question,
                 num_of_rules=30,
             )
-
             prompt = get_rules_prompt("rule_gen_prompt.j2", prompt_data, market_data)
-
             valid_market_ids = set(market_data.keys())
 
-            # LLM: generate 30 rules
+            # Generate rules using LLM
             logical_rules = get_rules(
                 prompt=prompt,
                 num_rules=30,
@@ -917,7 +1121,7 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
 
             used_markets = set()
 
-            # Score and store rules
+            # Score and store each rule
             for rule_obj in logical_rules:
                 rule_json = rule_obj.rule.model_dump_json()
                 readable = stringify_formula(rule_obj.rule)
@@ -927,42 +1131,44 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
                     overall_index_question=index_q.question,
                 )
 
-                # ---- Strength score ----
+                # Calculate strength score
                 s_prompt = get_prompt("rule_strength_score_prompt.j2", index_info)
                 s_reasonings, s_scores, s_avg = get_weight(
                     s_prompt, readable, client
                 )
 
-                # ---- Relevance score ----
+                # Get markets in this rule and their metrics
                 rule_markets = extract_literals_from_formula(rule_obj.rule)
                 market_metrics = {}
 
                 for mid in rule_markets:
                     used_markets.add(mid)
-
                     scores = session.exec(
                         select(MarketRelevanceScore)
                         .where(MarketRelevanceScore.market_id == mid)
                     ).all()
-
                     market_metrics[mid] = {
                         sc.score_type.relevance_score: sc.score_value
                         for sc in scores
                     }
 
+                # Build metrics text for relevance scoring
                 metrics_text = f"Rule: {readable}\n\nMarket Metrics:\n"
                 for mid, metrics in market_metrics.items():
-                    m = session.exec(select(Market).where(Market.id == mid)).first()
+                    m = session.exec(
+                        select(Market).where(Market.id == mid)
+                    ).first()
                     metrics_text += f"\nMarket {mid}: {m.question}\n"
                     for k, v in metrics.items():
                         metrics_text += f"  {k}: {v}\n"
 
+                # Calculate relevance score
                 r_prompt = get_prompt("rule_relevance_score_prompt.j2", index_info)
                 r_reasonings, r_scores, r_avg = get_relevance(
                     r_prompt, metrics_text, client
                 )
 
-                # ---- Store rule ----
+                # Store the rule
                 new_rule = MarketRule(
                     rule=rule_json,
                     readable_rule=readable,
@@ -980,7 +1186,7 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
                 session.add(new_rule)
                 session.flush()
 
-                # ---- Link rule to markets ----
+                # Link rule to its constituent markets
                 for mid in rule_markets:
                     session.add(MarketRuleLink(market_id=mid, rule_id=new_rule.id))
 
@@ -1003,22 +1209,46 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
         )
 
 
+# =============================================================================
+# Helper Functions - Simulation
+# =============================================================================
 
-def get_market_prob_series(session: Session, market_id: str,
-                           start_date: datetime, end_date: datetime) -> pd.Series:
-    """
-    Retrieve the full probability time series for a market between start_date and end_date.
 
-    Returns a pandas Series indexed by timestamp (hourly).
+def get_market_prob_series(
+    session: Session,
+    market_id: str,
+    start_date: datetime,
+    end_date: datetime
+) -> pd.Series:
     """
-    resolution = session.exec(select(Market.resolution).where(Market.id == market_id)).first()
+    Retrieve the probability time series for a market.
+
+    Constructs an hourly probability time series from bet data, forward-filling
+    gaps. Handles resolved markets by returning constant series.
+
+    Args:
+        session: SQLAlchemy session for database queries.
+        market_id: Unique identifier for the market.
+        start_date: Start of the time window.
+        end_date: End of the time window.
+
+    Returns:
+        A pandas Series indexed by hourly timestamps with probability values.
+        Returns -1.0 for time points with no data.
+
+    """
+    resolution = session.exec(
+        select(Market.resolution).where(Market.id == market_id)
+    ).first()
     time_index = pd.date_range(start=start_date, end=end_date, freq="1h")
 
+    # Handle resolved markets with constant probability
     if resolution == "YES":
         return pd.Series(1.0, index=time_index)
     elif resolution == "NO":
         return pd.Series(0.0, index=time_index)
 
+    # Fetch bet history
     bets = session.exec(
         select(MarketBet.created_time, MarketBet.prob_after)
         .where(MarketBet.contract_id == market_id)
@@ -1029,71 +1259,108 @@ def get_market_prob_series(session: Session, market_id: str,
     if not bets:
         return pd.Series(-1.0, index=time_index)
 
-    time_index = pd.date_range(start=start_date, end=end_date, freq="1h", tz="UTC")
-
+    # Build time-indexed probability series
+    time_index = pd.date_range(
+        start=start_date, end=end_date, freq="1h", tz="UTC"
+    )
     df_bets = pd.DataFrame(bets, columns=["created_time", "prob_after"])
     df_bets["created_time"] = pd.to_datetime(df_bets["created_time"], utc=True)
-    df_bets = df_bets.drop_duplicates(subset="created_time", keep="last").set_index("created_time")
+    df_bets = df_bets.drop_duplicates(
+        subset="created_time", keep="last"
+    ).set_index("created_time")
 
+    # Forward-fill probabilities to hourly grid
     series = df_bets["prob_after"].reindex(time_index, method="ffill").fillna(-1.0)
     return series
 
-def eval_formula(formula: Formula, world_row: np.ndarray, market_index_map: dict[str, int]) -> bool:
+
+def eval_formula(
+    formula: Formula,
+    world_row: np.ndarray,
+    market_index_map: dict[str, int]
+) -> bool:
     """
-    Recursively evaluates a Boolean formula against a binary simulation row.
+    Recursively evaluate a Boolean formula against a simulation row.
+
+    Evaluates a parsed Boolean formula tree by looking up variable values
+    in the simulation row and applying logical operators.
 
     Args:
-        formula (Formula): A parsed Boolean formula (Var or Op).
-        world_row (np.ndarray): A binary array representing a simulation.
-        market_index_map (dict[str, int]): Mapping from var names to column indices in world_row.
+        formula: A parsed Boolean formula (VariableNode or OperatorNode).
+        world_row: A binary array representing one simulation outcome.
+        market_index_map: Mapping from variable names to column indices.
 
     Returns:
-        bool: The result of evaluating the formula under the current simulation.
+        The Boolean result of evaluating the formula.
+
+    Raises:
+        ValueError: If an unknown operator is encountered.
+        TypeError: If the formula node type is invalid.
 
     """
-    # Base case: if the formula is a variable node, look up its value in the world row
+    # Base case: variable node - look up value in simulation row
     if isinstance(formula, VariableNode):
         idx = market_index_map.get(formula.var)
-        return bool(world_row[idx])  # Convert to bool in case it's a float or int
+        return bool(world_row[idx])
 
-    # Recursive case: formula is a logical operation (AND, OR, NOT, etc.)
+    # Recursive case: operator node - evaluate children and apply operator
     elif isinstance(formula, OperatorNode):
-        # Evaluate all child formulas recursively
-        args = [eval_formula(arg, world_row, market_index_map) for arg in formula.arguments]
+        args = [
+            eval_formula(arg, world_row, market_index_map)
+            for arg in formula.arguments
+        ]
         op = formula.node_type
 
-        # Apply the Boolean operator to the evaluated arguments
         if op == "and":
-            return all(args)               # True if all subformulas are True
+            return all(args)
         elif op == "or":
-            return any(args)              # True if any subformula is True
+            return any(args)
         elif op == "not":
-            return not args[0]            # True if the only child is False
+            return not args[0]
         elif op == "xor":
-            return sum(args) % 2 == 1     # True if exactly one argument is True
+            return sum(args) % 2 == 1
         elif op == "nand":
-            return not all(args)          # True if not all are True (negated AND)
+            return not all(args)
         elif op == "nor":
-            return not any(args)          # True if all are False (negated OR)
+            return not any(args)
         else:
-            raise ValueError(f"Unknown operator: {op}") # should never happen if model is validated
+            raise ValueError(f"Unknown operator: {op}")
 
-    # if input is not a Var or Op, raise an error
     else:
         raise TypeError(f"Invalid formula node: {formula}")
+
+
+# =============================================================================
+# Dagster Assets - Index Probability Calculation
+# =============================================================================
 
 
 @dg.asset(
     deps=[index_rules],
     required_resource_keys={"database_engine"},
-    description="Monte Carlo simulation for H5N1 outbreak probability using Gaussian copula."
+    description="Monte Carlo simulation for index probability using Gaussian copula."
 )
 def index_value(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
-    """Run Monte Carlo simulation to calculate H5N1 outbreak probability."""
-    # set seed
+    """
+    Calculate index probabilities using Monte Carlo simulation.
+
+    This asset runs a Gaussian copula-based Monte Carlo simulation to estimate
+    the probability of index events. For each index question:
+    1. Loads the latest batch of rules for that index
+    2. Builds probability time series for all constituent markets
+    3. Computes correlation structure using Gaussian copula
+    4. Simulates 10,000 worlds and evaluates rules
+    5. Calculates weighted risk index based on rule satisfaction
+
+    The simulation accounts for market correlations and uses rule weights
+    (strength and relevance) to compute a final probability estimate.
+    """
+    # Set random seed for reproducibility
     np.random.seed(42)
+
     with (Session(context.resources.database_engine) as session):
         index_questions = session.exec(select(IndexQuestion)).all()
+
         if not index_questions:
             context.log.error("No index questions found.")
             return dg.MaterializeResult(metadata={})
@@ -1101,19 +1368,24 @@ def index_value(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
         total_indices = 0
         index_probabilities = {}
 
+        # Process each index question
         for index_q in index_questions:
-            context.log.info(f"Running simulation for index question: {index_q.question}")
+            context.log.info(
+                f"Running simulation for index question: {index_q.question}"
+            )
 
-            # get all rules tied to this index question
+            # Get all rules for this index
             rules_for_index = session.exec(
                 select(MarketRule).where(MarketRule.index_id == index_q.id)
             ).all()
 
             if not rules_for_index:
-                context.log.warning(f"No rules found for index question {index_q.id}")
+                context.log.warning(
+                    f"No rules found for index question {index_q.id}"
+                )
                 continue
 
-            # find the most recent batch among those rules
+            # Find the most recent batch
             latest_batch = session.exec(
                 select(MarketRule.batch_id)
                 .where(MarketRule.index_id == index_q.id)
@@ -1122,96 +1394,100 @@ def index_value(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
             ).first()
 
             if latest_batch is None:
-                context.log.warning(f"No batch found for index question {index_q.id}")
+                context.log.warning(
+                    f"No batch found for index question {index_q.id}"
+                )
                 continue
 
-            # filter rules to only those in that batch
+            # Filter to only rules in the latest batch
             rules = [r for r in rules_for_index if r.batch_id == latest_batch]
 
             if not rules:
-                context.log.warning(f"No rules in latest batch for index question {index_q.id}")
+                context.log.warning(
+                    f"No rules in latest batch for index question {index_q.id}"
+                )
                 continue
 
-            # proceed with simulation using only these rules
+            # Extract rule metadata
             rule_ids = [r.id for r in rules]
             rule_strength_weights = [r.strength_weight for r in rules]
             rule_relevance_weights = [r.relevance_weight for r in rules]
             rule_avg_weights = [
-                (s + r) / 2 for s, r in zip(rule_strength_weights,
-                                            rule_relevance_weights, strict=False)
+                (s + r) / 2
+                for s, r in zip(
+                    rule_strength_weights, rule_relevance_weights, strict=False
+                )
             ]
 
-            # Get market links and unique markets from rules
+            # Get all markets linked to these rules
             market_links_by_rule = {}
             all_market_ids = set()
             for rule in rules:
                 market_ids = list(session.exec(
-                    select(MarketRuleLink.market_id).where(MarketRuleLink.rule_id == rule.id)
+                    select(MarketRuleLink.market_id)
+                    .where(MarketRuleLink.rule_id == rule.id)
                 ))
                 market_links_by_rule[rule.id] = market_ids
                 all_market_ids.update(market_ids)
 
             unique_literals = list(all_market_ids)
 
-            # Create index of timestamps
+            # Build probability time series
             end_date = datetime.now(UTC)
-            # use up to 60 days worth of data
             start_date = end_date - timedelta(days=60)
-            time_index = pd.date_range(start=start_date, end=end_date, freq='1h')
+            time_index = pd.date_range(
+                start=start_date, end=end_date, freq='1h'
+            )
 
-            # Initialize empty DataFrame
-            df_probs = pd.DataFrame(index=time_index, columns=unique_literals, dtype=float)
+            df_probs = pd.DataFrame(
+                index=time_index, columns=unique_literals, dtype=float
+            )
 
-            # Fill DataFrame using market lookup function
             for market_id in unique_literals:
-                df_probs[market_id] = get_market_prob_series(session, market_id,
-                                                             start_date, end_date)
-                context.log.info(f"Loaded probability series for market {market_id}")
+                df_probs[market_id] = get_market_prob_series(
+                    session, market_id, start_date, end_date
+                )
+                context.log.info(
+                    f"Loaded probability series for market {market_id}"
+                )
 
-            # Gaussian copula correlation matrix
-            # all probs that were not found (ie, that were -1 and NaN)
+            # Compute Gaussian copula correlation
+            # Replace missing values and transform to latent Gaussian space
             df_probs_clean = df_probs.replace(-1, np.nan)
-            # transform probabilities into a latent Gaussian space
-            # inverse CDF (quantile function) of the standard normal distribution
             latent_vars = df_probs_clean.apply(norm.ppf)
-            # the Pearson correlation matrix
-            # min_periods=10 so we only compute correlation if there are at least 10
-            # overlapping time points — otherwise it returns NaN.
-            # NaNs in the correlation matrix are replaced with 0,
-            # assuming independence between those pairs
+
+            # Compute correlation matrix (minimum 10 overlapping points)
             corr_df = latent_vars.corr(min_periods=10).fillna(0)
             corr_matrix = corr_df.values
 
-            # thresholds are equal to the current market prob (most recent prob_after)
+            # Get current thresholds from most recent probabilities
             thresholds_dict = {}
             for market_id in unique_literals:
                 series = df_probs[market_id].dropna()
                 thresholds_dict[market_id] = series.iloc[-1]
 
-            # sample worlds using copula
+            # Prepare for simulation
             dim = len(unique_literals)
             thresholds = np.array([
                 norm.ppf(np.clip(thresholds_dict.get(lit), 1e-6, 1 - 1e-6))
                 for lit in unique_literals
             ])
 
-            # make sure the matrix is PSD
-            # to sample from a multivariate normal with np.random.multivariate_normal,
-            # we need PSD covariance matrix
+            # Ensure correlation matrix is positive semi-definite
             eps = 1e-3
-            # corr_matrix = eigvecs @ np.diag(eigvals) @ eigvecs.T
             eigvals, eigvecs = np.linalg.eigh(corr_matrix)
-            # Eigenvalues must be ≥ 0 for the matrix to be PSD
             eigvals_clipped = np.clip(eigvals, eps, None)
-            # corr_psd = eigvecs @ np.diag(eigvals_clipped) @ eigvecs.T
             corr_psd = eigvecs @ np.diag(eigvals_clipped) @ eigvecs.T
 
-            # sample 10000 "worlds"
-            z_samples = np.random.multivariate_normal(mean=np.zeros(dim), cov=corr_psd, size=10000)
-            # make markets true or false based on thresholds
+            # Run Monte Carlo simulation
+            # Sample 10,000 correlated normal vectors
+            z_samples = np.random.multivariate_normal(
+                mean=np.zeros(dim), cov=corr_psd, size=10000
+            )
+            # Convert to binary outcomes based on thresholds
             bool_samples = (z_samples < thresholds).astype(bool)
 
-            # normalize rule weights (guard against division by zero)
+            # Normalize rule weights (guard against zero sum)
             weights = np.array(rule_avg_weights, dtype=float)
             weight_sum = weights.sum()
 
@@ -1224,12 +1500,13 @@ def index_value(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
             else:
                 norm_weights = weights / weight_sum
 
-            # set up for evaluating the rules
-            market_index_map = {name: idx for idx, name in enumerate(unique_literals)}
+            # Evaluate rules across simulations
+            market_index_map = {
+                name: idx for idx, name in enumerate(unique_literals)
+            }
             n_simulations = bool_samples.shape[0]
             rule_indicator_matrix = np.zeros((n_simulations, len(rules)))
 
-            # for rule, turn it back into a formula and evaluate it for each world
             for i, rule in enumerate(rules):
                 try:
                     raw_rule = rule.rule
@@ -1243,17 +1520,20 @@ def index_value(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
                 for j in range(n_simulations):
                     world_row = bool_samples[j]
                     try:
-                        rule_result = eval_formula(formula, world_row, market_index_map)
+                        rule_result = eval_formula(
+                            formula, world_row, market_index_map
+                        )
                         rule_indicator_matrix[j, i] = float(rule_result)
                     except Exception as e:
-                        context.log.warning(f"Error evaluating rule {rule.id} on simulation {j}: "
-                                            f"{e}")
+                        context.log.warning(
+                            f"Error evaluating rule {rule.id} on simulation {j}: {e}"
+                        )
 
-            # use the weights to score each world for how risky it is
+            # Calculate weighted risk index
             scores = rule_indicator_matrix @ norm_weights
             risk_index = scores.mean()
 
-            # build a json summary of the rules in the sim
+            # Build JSON summary
             rules_json = []
             for rule in rules:
                 rules_json.append({
@@ -1262,7 +1542,9 @@ def index_value(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
                     "rule": rule.rule,
                     "strength_weight": rule.strength_weight,
                     "relevance_weight": rule.relevance_weight,
-                    "avg_weight": ((rule.strength_weight) + (rule.relevance_weight)) / 2,
+                    "avg_weight": (
+                        (rule.strength_weight + rule.relevance_weight) / 2
+                    ),
                     "chain_of_thoughts": rule.chain_of_thoughts,
                     "strength_scores": json.loads(rule.strength_scores or "[]"),
                     "relevance_scores": json.loads(rule.relevance_scores or "[]"),
@@ -1271,14 +1553,13 @@ def index_value(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
                     "market_ids": [m.id for m in rule.markets]
                 })
 
-            # json rep of the simulation
             json_rep = {
                 "index_probability": risk_index,
                 "market_ids_in_rules": list(unique_literals),
                 "rules": rules_json
             }
 
-            # add to the DB
+            # Store index result
             new_index = Index(
                 index_probability=float(risk_index),
                 index_question_id=str(index_q.id),
@@ -1288,8 +1569,9 @@ def index_value(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
             session.add(new_index)
             session.flush()
             context.log.info("Added index")
+
+            # Link index to its constituent rules
             for rule_id in rule_ids:
-                # The rule contains actual rules IDs, not text representations
                 rule_obj = session.exec(
                     select(MarketRule).where(MarketRule.id == rule_id)
                 ).first()

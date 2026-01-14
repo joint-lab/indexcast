@@ -127,14 +127,14 @@ def validate_market_ids(rule: Formula, allowed_ids: set[str]):
 
 
 def response_with_n(n: int) -> type[BaseModel]:
-    """Enforce EXACTLY n rules returned from the model."""
+    """Enforce n:n+5 rules returned from the model."""
     return create_model(
         f"ResponseWith{n}",
-        content=(list[FormulaItem], Field(min_length=n, max_length=n)),
+        content=(list[FormulaItem], Field(min_length=n, max_length=n + 5)),
     )
 
 
-# --- Data Model for Prompt Input ---
+# Data Model for Prompt Input
 class PromptInformation(BaseModel):
     """Structured model for Disease information."""
 
@@ -177,6 +177,7 @@ def get_rules(
     )
 
     rules = response.content
+    rules = rules[:30]
     for rule_item in rules:
         r = rule_item.rule
 

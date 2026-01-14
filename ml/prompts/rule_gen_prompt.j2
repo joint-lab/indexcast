@@ -67,6 +67,18 @@ If you identify more than {{num_of_rules}}, select the {{num_of_rules}} most div
 
 3. **Functional Uniqueness**
    All final rules must be meaningfully and logically distinct.
+    UNIQUENESS DEFINITION (MANDATORY)
+
+    Two rules are considered DUPLICATES if they share ANY of the following:
+    - the same set of market IDs (order does not matter)
+    - the same causal mechanism or interpretation
+    - the same logical structure with only superficial changes (e.g., AND reordered, trivial NOT)
+    - the same sufficient condition phrased differently
+
+    Every rule MUST introduce a new causal pathway or guarantee mechanism not used before.
+
+    Before finalizing output, internally verify that all rules are pairwise unique under this definition.
+
 
 4. **Logical Sufficiency**
    Each final rule must, if true, logically *guarantee* that the target event will occur.
@@ -119,3 +131,9 @@ Return a single JSON object:
 
 Generate **exactly {{num_of_rules}} logically sufficient, structurally valid, semantically diverse rules now.
 Do not exceed the required number.
+
+Before returning the final JSON:
+- Count the rules.
+- Confirm the count equals {{num_of_rules}}.
+- Verify every rule is unique under the uniqueness definition.
+- If uniqueness or count cannot be satisfied, regenerate internally until both are true.
