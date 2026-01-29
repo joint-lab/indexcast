@@ -22,6 +22,7 @@ MAX_CHILDREN_PER_NODE = 3
 DEFAULT_MODEL = "gpt-4.1"
 DEFAULT_TEMPERATURE = 0.8
 DEFAULT_MAX_RETRIES = 3
+MAX_NUMBER_OF_RULES = 30
 ALLOWED_OPS = ["and", "or", "not"]
 
 class VariableNode(BaseModel):
@@ -127,10 +128,10 @@ def validate_market_ids(rule: Formula, allowed_ids: set[str]):
 
 
 def response_with_n(n: int) -> type[BaseModel]:
-    """Enforce n:n+5 rules returned from the model."""
+    """Enforce 1:n rules returned from the model."""
     return create_model(
         f"ResponseWith{n}",
-        content=(list[FormulaItem], Field(min_length=n, max_length=n + 5)),
+        content=(list[FormulaItem], Field(min_length=1, max_length=n)),
     )
 
 
@@ -140,11 +141,11 @@ class PromptInformation(BaseModel):
 
     date: datetime = Field(description="The date we are interested in.")
     overall_index_question: str = Field(description="Overall index question.")
-    num_of_rules: int = Field(description="Number of rules to be generated.")
+    max_num_of_rules: int = Field(description="Max number of rules to be generated.")
 
 def get_rules(
     prompt: str,
-    num_rules: int,
+    max_num_rules: int,
     client: instructor.Instructor,
     allowed_market_ids: set[str],
     model: str = DEFAULT_MODEL,
@@ -155,7 +156,7 @@ def get_rules(
 
     Args:
         prompt: The system-level instruction or prompt for ranking.
-        num_rules: number of rules to be generated.
+        max_num_rules: maximum number of rules to be generated.
         client: An Instructor-enhanced OpenAI client.
         model: The model to use for generation.
         allowed_market_ids: set of valid market IDs.
@@ -166,7 +167,7 @@ def get_rules(
         A list of FormulaItems.
 
     """
-    response_model = response_with_n(num_rules)
+    response_model = response_with_n(max_num_rules)
 
     response = client.chat.completions.create(
         model=model,
@@ -177,7 +178,7 @@ def get_rules(
     )
 
     rules = response.content
-    rules = rules[:30]
+    rules = rules[:MAX_NUMBER_OF_RULES]
     for rule_item in rules:
         r = rule_item.rule
 
@@ -214,7 +215,7 @@ def get_rules_prompt(
     return template.render(
         date=prompt_data.date,
         overall_index_question=prompt_data.overall_index_question,
-        num_of_rules=prompt_data.num_of_rules,
+        max_num_of_rules=prompt_data.max_num_of_rules,
         markets=markets,
     )
 

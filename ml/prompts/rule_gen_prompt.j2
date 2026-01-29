@@ -1,6 +1,6 @@
 You are an expert at constructing Boolean logic rules that identify **sufficient conditions** for a target event, using prediction market data.
 
-Your task: Generate **exactly {{num_of_rules}} Boolean rules** that each represent a condition that is **logically sufficient** to guarantee that the event described by "{{overall_index_question}}" will occur.
+Your task: Generate **up to {{max_num_of_rules}} Boolean rules** that each represent a condition that is **logically sufficient** to guarantee that the event described by "{{overall_index_question}}" will occur.
 
 Target Event: {{overall_index_question}}
 Analysis Date: {{date}}
@@ -16,7 +16,7 @@ Privately brainstorm a large set of possible rules (e.g., 50+), of which at leas
 Ensure these internal candidates cover **multiple causal mechanisms**, **different types of market signals**, and **different structural forms** (AND/OR/NOT).
 
 ### **Phase 2 — Selection of Final Rules (shown in output)**
-From the internal candidates, select **exactly {{num_of_rules}} rules** that satisfy:
+From the internal candidates, select **up to {{max_num_of_rules}} rules** that satisfy:
 
 ### **1. Logical Guarantee**
 Each final rule must individually *force* or *ensure* the target event, based on the meaning of its markets.
@@ -48,8 +48,7 @@ Single-variable rules should be treated as default-invalid unless the market exp
 If uncertain, combine it with at least one other reinforcing signal using AND or OR.
 
 
-### **Never output more than {{num_of_rules}} rules.**
-If you identify more than {{num_of_rules}}, select the {{num_of_rules}} most diverse + strongest.
+If you identify more than {{max_num_of_rules}}, select the {{max_num_of_rules}} most diverse + strongest.
 
 ---
 
@@ -117,7 +116,7 @@ Return a single JSON object:
 }
 
 ### STRICT OUTPUT RULES
-- Output **exactly {{num_of_rules}}** rules
+- Output **up to {{max_num_of_rules}}** rules
 - No extra keys anywhere
 - Max depth = 2
 - Max 3 unique market IDs per rule
@@ -129,11 +128,11 @@ Return a single JSON object:
 
 # FINAL INSTRUCTION
 
-Generate **exactly {{num_of_rules}} logically sufficient, structurally valid, semantically diverse rules now.
+Generate **up to {{max_num_of_rules}} logically sufficient, structurally valid, semantically diverse rules now.
 Do not exceed the required number.
 
 Before returning the final JSON:
 - Count the rules.
-- Confirm the count equals {{num_of_rules}}.
+- Confirm the count is ≤ {{max_num_of_rules}} and ≥ 1.
 - Verify every rule is unique under the uniqueness definition.
 - If uniqueness or count cannot be satisfied, regenerate internally until both are true.
