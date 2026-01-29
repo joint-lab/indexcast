@@ -1,10 +1,10 @@
 # Project Cemetery
 
-This file records deprecated, removed, or unused components for historical reference.
+This file records used components that have been removed for historical reference.
 
 ---
 
-## Date: Nov. 26
+## Date: Nov. 26, 2025
 
 ### Dagster Assets
 - **prompt generation**  
@@ -13,30 +13,30 @@ This file records deprecated, removed, or unused components for historical refer
 
 - **index relevance asset**  
   Produced a relevance score measuring how closely market information aligned with the H5N1 index.  
-  Removed.
+  Removed in favor of direct relevance scoring when classifying.
 
 - **temporal relevance asset**  
   Produced a relevance score based on the timing of market information relative to the H5N1 index.  
-  Removed.
+  Removed in favor of direct relevance scoring when classifying.
 
 - **geographic relevance asset**  
   Produced a relevance score based on the geographic context of market information relative to the H5N1 index.  
-  Removed.
+  Removed in favor of direct relevance scoring when classifying.
 
 ---
 
 ### Text Files
 - **geographic_relevance_prompt.j2**  
   Template used to generate prompts for geographic relevance scoring.  
-  Removed.
+  Unused and removed.
 
 - **index_question_relevance_prompt.j2**  
   Template used to generate prompts for index question relevance scoring.  
-  Removed.
+  Unused and removed.
 
 - **temporal_relevance_prompt.j2**  
   Template used to generate prompts for temporal relevance scoring.  
-  Removed.
+  Unused and removed.
 
 ---
 
@@ -61,7 +61,7 @@ This file records deprecated, removed, or unused components for historical refer
   - **pre‑prompting filter**: applied eligibility labels before prompting.  
   Removed.  
 
-- Models in this folder were trained using the following notebooks (all removed):  
+- Models in this folder were trained using the following notebooks (**all removed Jan. 14th 2026**):  
   - `market_classification_summary.ipynb`  
     Trained and summarized classification models for market labeling.  
   - `MLP_for_rule_eligibilty.ipynb`  
