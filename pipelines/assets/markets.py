@@ -1091,8 +1091,12 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
                 select(Market)
                 .join(MarketLabel, Market.id == MarketLabel.market_id)
                 .where(MarketLabel.label_type_id == index_id)
-                .where(MarketLabel.is_eligible == True)
+                .where(MarketLabel.is_eligible.is_(True))
             ).all()
+            context.log.info(
+                f"{len(eligible_markets)}"
+            )
+
 
             if not eligible_markets:
                 context.log.info(
@@ -1115,7 +1119,7 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
             prompt_data = PromptInformation(
                 date=datetime.now(UTC),
                 overall_index_question=index_q.question,
-                num_of_rules=30,
+                max_num_of_rules=30,
             )
             prompt = get_rules_prompt("rule_gen_prompt.j2", prompt_data, market_data)
             valid_market_ids = set(market_data.keys())
@@ -1123,7 +1127,7 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
             # Generate rules using LLM
             logical_rules = get_rules(
                 prompt=prompt,
-                num_rules=30,
+                max_num_rules=30,
                 client=client,
                 allowed_market_ids=valid_market_ids,
             )
