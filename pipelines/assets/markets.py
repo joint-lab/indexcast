@@ -914,21 +914,21 @@ def relevance_summary_statistics(context: dg.AssetExecutionContext) -> dg.Materi
 @dg.asset(
     deps=[relevance_summary_statistics],
     required_resource_keys={"database_engine"},
-    description="Remove non-eligible index labels per market based on metrics."
+    description="Update eligibility status of index labels per market based on metrics."
 )
 def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     """
     Filter market labels based on eligibility criteria.
 
-    This asset removes market-label associations for markets that don't meet
-    minimum quality thresholds:
+    This asset updates the is_eligible flag on market-label associations based
+    on minimum quality thresholds:
     - Must be a BINARY outcome type
     - Must have volume >= 200
     - Must have >= 11 unique traders
     - Must have question relevance score >= 0.6
 
-    Labels that don't meet these criteria are removed to ensure only high-quality
-    markets are used in rule generation.
+    Labels that don't meet these criteria are marked as ineligible. Labels that
+    were previously ineligible but now meet criteria are restored to eligible.
     """
     # Index labels to check for eligibility
     index_labels = [
@@ -986,7 +986,8 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
     # Eligibility thresholds
     volume_threshold = 200
     traders_threshold = 11
-    num_labels_removed = 0
+    num_labels_marked_ineligible = 0
+    num_labels_restored = 0
 
     with Session(context.resources.database_engine) as session:
         for label in market_labels:
@@ -1011,16 +1012,24 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
             elif question_score is None or question_score < 0.6:
                 is_eligible = False
 
-            if not is_eligible:
-                session.delete(label)
-                num_labels_removed += 1
+            # Merge detached label into current session and update eligibility
+            attached_label = session.merge(label)
+            if not is_eligible and attached_label.is_eligible:
+                attached_label.is_eligible = False
+                num_labels_marked_ineligible += 1
+            elif is_eligible and not attached_label.is_eligible:
+                attached_label.is_eligible = True
+                num_labels_restored += 1
 
         session.commit()
 
     return dg.MaterializeResult(
         metadata={
             "num_labels_checked": dg.MetadataValue.int(len(market_labels)),
-            "num_labels_removed": dg.MetadataValue.int(num_labels_removed),
+            "num_labels_marked_ineligible": dg.MetadataValue.int(
+                num_labels_marked_ineligible
+            ),
+            "num_labels_restored": dg.MetadataValue.int(num_labels_restored),
         }
     )
 
@@ -1082,6 +1091,7 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
                 select(Market)
                 .join(MarketLabel, Market.id == MarketLabel.market_id)
                 .where(MarketLabel.label_type_id == index_id)
+                .where(MarketLabel.is_eligible == True)  # noqa: E712
             ).all()
 
             if not eligible_markets:
