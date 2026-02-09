@@ -1091,7 +1091,7 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
                 select(Market)
                 .join(MarketLabel, Market.id == MarketLabel.market_id)
                 .where(MarketLabel.label_type_id == index_id)
-                .where(MarketLabel.is_eligible == True)  # noqa: E712
+                .where(MarketLabel.is_eligible == True)
             ).all()
 
             if not eligible_markets:
