@@ -1093,10 +1093,6 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
                 .where(MarketLabel.label_type_id == index_id)
                 .where(MarketLabel.is_eligible.is_(True))
             ).all()
-            context.log.info(
-                f"{len(eligible_markets)}"
-            )
-
 
             if not eligible_markets:
                 context.log.info(
