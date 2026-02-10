@@ -914,21 +914,21 @@ def relevance_summary_statistics(context: dg.AssetExecutionContext) -> dg.Materi
 @dg.asset(
     deps=[relevance_summary_statistics],
     required_resource_keys={"database_engine"},
-    description="Remove non-eligible index labels per market based on metrics."
+    description="Update eligibility status of index labels per market based on metrics."
 )
 def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     """
     Filter market labels based on eligibility criteria.
 
-    This asset removes market-label associations for markets that don't meet
-    minimum quality thresholds:
+    This asset updates the is_eligible flag on market-label associations based
+    on minimum quality thresholds:
     - Must be a BINARY outcome type
     - Must have volume >= 200
     - Must have >= 11 unique traders
     - Must have question relevance score >= 0.6
 
-    Labels that don't meet these criteria are removed to ensure only high-quality
-    markets are used in rule generation.
+    Labels that don't meet these criteria are marked as ineligible. Labels that
+    were previously ineligible but now meet criteria are restored to eligible.
     """
     # Index labels to check for eligibility
     index_labels = [
@@ -957,18 +957,17 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
             )
         ).all()
 
-    market_ids = list(set(label.market_id for label in market_labels))
+        market_ids = list(set(label.market_id for label in market_labels))
 
-    # Score type IDs for eligibility checks
-    question_score_type_id = MarketRelevanceScoreType.INDEX_QUESTION_RELEVANCE.value
-    volume_score_type_id = MarketRelevanceScoreType.VOLUME_TOTAL.value
-    traders_score_type_id = MarketRelevanceScoreType.NUM_TRADERS.value
-    score_type_ids_set = {
-        question_score_type_id, volume_score_type_id, traders_score_type_id
-    }
+        # Score type IDs for eligibility checks
+        question_score_type_id = MarketRelevanceScoreType.INDEX_QUESTION_RELEVANCE.value
+        volume_score_type_id = MarketRelevanceScoreType.VOLUME_TOTAL.value
+        traders_score_type_id = MarketRelevanceScoreType.NUM_TRADERS.value
+        score_type_ids_set = {
+            question_score_type_id, volume_score_type_id, traders_score_type_id
+        }
 
-    # Fetch all relevant scores
-    with Session(context.resources.database_engine) as session:
+        # Fetch all relevant scores
         all_scores = session.exec(
             select(MarketRelevanceScore)
             .where(
@@ -977,18 +976,18 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
             )
         ).all()
 
-    # Build score lookup for efficient access
-    score_lookup = {
-        (score.market_id, score.score_type_id): score.score_value
-        for score in all_scores
-    }
+        # Build score lookup for efficient access
+        score_lookup = {
+            (score.market_id, score.score_type_id): score.score_value
+            for score in all_scores
+        }
 
-    # Eligibility thresholds
-    volume_threshold = 200
-    traders_threshold = 11
-    num_labels_removed = 0
+        # Eligibility thresholds
+        volume_threshold = 200
+        traders_threshold = 11
+        num_labels_marked_ineligible = 0
+        num_labels_restored = 0
 
-    with Session(context.resources.database_engine) as session:
         for label in market_labels:
             m_id = label.market_id
             question_score = score_lookup.get((m_id, question_score_type_id))
@@ -1011,16 +1010,23 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
             elif question_score is None or question_score < 0.6:
                 is_eligible = False
 
-            if not is_eligible:
-                session.delete(label)
-                num_labels_removed += 1
+            # Update eligibility
+            if not is_eligible and label.is_eligible:
+                label.is_eligible = False
+                num_labels_marked_ineligible += 1
+            elif is_eligible and not label.is_eligible:
+                label.is_eligible = True
+                num_labels_restored += 1
 
         session.commit()
 
     return dg.MaterializeResult(
         metadata={
             "num_labels_checked": dg.MetadataValue.int(len(market_labels)),
-            "num_labels_removed": dg.MetadataValue.int(num_labels_removed),
+            "num_labels_marked_ineligible": dg.MetadataValue.int(
+                num_labels_marked_ineligible
+            ),
+            "num_labels_restored": dg.MetadataValue.int(num_labels_restored),
         }
     )
 
@@ -1082,6 +1088,7 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
                 select(Market)
                 .join(MarketLabel, Market.id == MarketLabel.market_id)
                 .where(MarketLabel.label_type_id == index_id)
+                .where(MarketLabel.is_eligible.is_(True))
             ).all()
 
             if not eligible_markets:
@@ -1105,7 +1112,7 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
             prompt_data = PromptInformation(
                 date=datetime.now(UTC),
                 overall_index_question=index_q.question,
-                num_of_rules=30,
+                max_num_of_rules=30,
             )
             prompt = get_rules_prompt("rule_gen_prompt.j2", prompt_data, market_data)
             valid_market_ids = set(market_data.keys())
@@ -1113,7 +1120,7 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
             # Generate rules using LLM
             logical_rules = get_rules(
                 prompt=prompt,
-                num_rules=30,
+                max_num_rules=30,
                 client=client,
                 allowed_market_ids=valid_market_ids,
             )

@@ -191,6 +191,7 @@ class MarketLabel(SQLModel, table=True):
 
     market_id: str = Field(primary_key=True, foreign_key="markets.id")
     label_type_id: int = Field(primary_key=True, foreign_key="market_label_types.id")
+    is_eligible: bool = Field(default=True)
 
     # Relationships
     market: "Market" = Relationship(back_populates="labels")
