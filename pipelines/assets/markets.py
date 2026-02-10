@@ -957,18 +957,17 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
             )
         ).all()
 
-    market_ids = list(set(label.market_id for label in market_labels))
+        market_ids = list(set(label.market_id for label in market_labels))
 
-    # Score type IDs for eligibility checks
-    question_score_type_id = MarketRelevanceScoreType.INDEX_QUESTION_RELEVANCE.value
-    volume_score_type_id = MarketRelevanceScoreType.VOLUME_TOTAL.value
-    traders_score_type_id = MarketRelevanceScoreType.NUM_TRADERS.value
-    score_type_ids_set = {
-        question_score_type_id, volume_score_type_id, traders_score_type_id
-    }
+        # Score type IDs for eligibility checks
+        question_score_type_id = MarketRelevanceScoreType.INDEX_QUESTION_RELEVANCE.value
+        volume_score_type_id = MarketRelevanceScoreType.VOLUME_TOTAL.value
+        traders_score_type_id = MarketRelevanceScoreType.NUM_TRADERS.value
+        score_type_ids_set = {
+            question_score_type_id, volume_score_type_id, traders_score_type_id
+        }
 
-    # Fetch all relevant scores
-    with Session(context.resources.database_engine) as session:
+        # Fetch all relevant scores
         all_scores = session.exec(
             select(MarketRelevanceScore)
             .where(
@@ -977,19 +976,18 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
             )
         ).all()
 
-    # Build score lookup for efficient access
-    score_lookup = {
-        (score.market_id, score.score_type_id): score.score_value
-        for score in all_scores
-    }
+        # Build score lookup for efficient access
+        score_lookup = {
+            (score.market_id, score.score_type_id): score.score_value
+            for score in all_scores
+        }
 
-    # Eligibility thresholds
-    volume_threshold = 200
-    traders_threshold = 11
-    num_labels_marked_ineligible = 0
-    num_labels_restored = 0
+        # Eligibility thresholds
+        volume_threshold = 200
+        traders_threshold = 11
+        num_labels_marked_ineligible = 0
+        num_labels_restored = 0
 
-    with Session(context.resources.database_engine) as session:
         for label in market_labels:
             m_id = label.market_id
             question_score = score_lookup.get((m_id, question_score_type_id))
@@ -1012,13 +1010,12 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
             elif question_score is None or question_score < 0.6:
                 is_eligible = False
 
-            # Merge detached label into current session and update eligibility
-            attached_label = session.merge(label)
-            if not is_eligible and attached_label.is_eligible:
-                attached_label.is_eligible = False
+            # Update eligibility
+            if not is_eligible and label.is_eligible:
+                label.is_eligible = False
                 num_labels_marked_ineligible += 1
-            elif is_eligible and not attached_label.is_eligible:
-                attached_label.is_eligible = True
+            elif is_eligible and not label.is_eligible:
+                label.is_eligible = True
                 num_labels_restored += 1
 
         session.commit()
