@@ -25,3 +25,7 @@ cp example_configuration.sh configuration.sh
 nano configuration.sh
 source configuration.sh
 ```
+
+# Acknowledgments
+
+Work on this package was supported by the National Science Foundation under Award No. 2242829.
