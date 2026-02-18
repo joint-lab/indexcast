@@ -15,11 +15,8 @@ import time
 from datetime import UTC, datetime, timedelta
 
 import dagster as dg
-import numpy as np
-import pandas as pd
 import requests
 from pydantic import TypeAdapter
-from scipy.stats import norm
 from sqlalchemy import delete, func
 from sqlmodel import Session, select
 
@@ -983,8 +980,8 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
         }
 
         # Eligibility thresholds
-        volume_threshold = 200
-        traders_threshold = 11
+        volume_threshold = 500
+        traders_threshold = 20
         num_labels_marked_ineligible = 0
         num_labels_restored = 0
 
@@ -1217,88 +1214,24 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
 
 
 # =============================================================================
-# Helper Functions - Simulation
+# Helper Functions - Formula Evaluation
 # =============================================================================
 
-
-def get_market_prob_series(
-    session: Session,
-    market_id: str,
-    start_date: datetime,
-    end_date: datetime
-) -> pd.Series:
-    """
-    Retrieve the probability time series for a market.
-
-    Constructs an hourly probability time series from bet data, forward-filling
-    gaps. Handles resolved markets by returning constant series.
-
-    Args:
-        session: SQLAlchemy session for database queries.
-        market_id: Unique identifier for the market.
-        start_date: Start of the time window.
-        end_date: End of the time window.
-
-    Returns:
-        A pandas Series indexed by hourly timestamps with probability values.
-        Returns -1.0 for time points with no data.
-
-    """
-    resolution = session.exec(
-        select(Market.resolution).where(Market.id == market_id)
-    ).first()
-    time_index = pd.date_range(start=start_date, end=end_date, freq="1h")
-
-    # Handle resolved markets with constant probability
-    if resolution == "YES":
-        return pd.Series(1.0, index=time_index)
-    elif resolution == "NO":
-        return pd.Series(0.0, index=time_index)
-
-    # Fetch bet history
-    bets = session.exec(
-        select(MarketBet.created_time, MarketBet.prob_after)
-        .where(MarketBet.contract_id == market_id)
-        .where(MarketBet.created_time <= end_date)
-        .order_by(MarketBet.created_time)
-    ).all()
-
-    if not bets:
-        return pd.Series(-1.0, index=time_index)
-
-    # Build time-indexed probability series
-    time_index = pd.date_range(
-        start=start_date, end=end_date, freq="1h", tz="UTC"
-    )
-    df_bets = pd.DataFrame(bets, columns=["created_time", "prob_after"])
-    df_bets["created_time"] = pd.to_datetime(df_bets["created_time"], utc=True)
-    df_bets = df_bets.drop_duplicates(
-        subset="created_time", keep="last"
-    ).set_index("created_time")
-
-    # Forward-fill probabilities to hourly grid
-    series = df_bets["prob_after"].reindex(time_index, method="ffill").fillna(-1.0)
-    return series
-
-
-def eval_formula(
+def eval_formula_prob(
     formula: Formula,
-    world_row: np.ndarray,
-    market_index_map: dict[str, int]
-) -> bool:
+    market_probs: dict[str, float]
+) -> float:
     """
-    Recursively evaluate a Boolean formula against a simulation row.
+    Evaluate the probability of a Boolean formula under independence assumption.
 
-    Evaluates a parsed Boolean formula tree by looking up variable values
-    in the simulation row and applying logical operators.
+    Recursively computes P(formula = True) given independent market probabilities.
 
     Args:
         formula: A parsed Boolean formula (VariableNode or OperatorNode).
-        world_row: A binary array representing one simulation outcome.
-        market_index_map: Mapping from variable names to column indices.
+        market_probs: Mapping from market IDs to their current probabilities.
 
     Returns:
-        The Boolean result of evaluating the formula.
+        The probability that the formula evaluates to True.
 
     Raises:
         ValueError: If an unknown operator is encountered.
@@ -1307,29 +1240,28 @@ def eval_formula(
     """
     # Base case: variable node - look up value in simulation row
     if isinstance(formula, VariableNode):
-        idx = market_index_map.get(formula.var)
-        return bool(world_row[idx])
+        return market_probs[formula.var]
 
     # Recursive case: operator node - evaluate children and apply operator
     elif isinstance(formula, OperatorNode):
-        args = [
-            eval_formula(arg, world_row, market_index_map)
+        child_probs = [
+            eval_formula_prob(arg, market_probs)
             for arg in formula.arguments
         ]
         op = formula.node_type
 
         if op == "and":
-            return all(args)
+            result = 1.0
+            for p in child_probs:
+                result *= p
+            return result
         elif op == "or":
-            return any(args)
+            result = 1.0
+            for p in child_probs:
+                result *= (1.0 - p)
+            return 1.0 - result
         elif op == "not":
-            return not args[0]
-        elif op == "xor":
-            return sum(args) % 2 == 1
-        elif op == "nand":
-            return not all(args)
-        elif op == "nor":
-            return not any(args)
+            return 1.0 - child_probs[0]
         else:
             raise ValueError(f"Unknown operator: {op}")
 
@@ -1345,27 +1277,19 @@ def eval_formula(
 @dg.asset(
     deps=[index_rules],
     required_resource_keys={"database_engine"},
-    description="Monte Carlo simulation for index probability using Gaussian copula."
+    description="Index probability via weighted average of rules under independence assumption."
 )
 def index_value(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     """
-    Calculate index probabilities using Monte Carlo simulation.
+    Calculate index probabilities using rule evaluation under independence.
 
-    This asset runs a Gaussian copula-based Monte Carlo simulation to estimate
-    the probability of index events. For each index question:
-    1. Loads the latest batch of rules for that index
-    2. Builds probability time series for all constituent markets
-    3. Computes correlation structure using Gaussian copula
-    4. Simulates 10,000 worlds and evaluates rules
-    5. Calculates weighted risk index based on rule satisfaction
-
-    The simulation accounts for market correlations and uses rule weights
-    (strength and relevance) to compute a final probability estimate.
+    For each index question:
+    1. Loads the latest batch of rules.
+    2. Fetches current probabilities for all constituent markets.
+    3. Evaluates each rule's probability under the independence assumption.
+    4. Computes a weighted average of rule probabilities using strength/relevance weights.
     """
-    # Set random seed for reproducibility
-    np.random.seed(42)
-
-    with (Session(context.resources.database_engine) as session):
+    with Session(context.resources.database_engine) as session:
         index_questions = session.exec(select(IndexQuestion)).all()
 
         if not index_questions:
@@ -1378,19 +1302,9 @@ def index_value(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
         # Process each index question
         for index_q in index_questions:
             context.log.info(
-                f"Running simulation for index question: {index_q.question}"
+                f"Calculating index value for: {index_q.question}"
             )
 
-            # Get all rules for this index
-            rules_for_index = session.exec(
-                select(MarketRule).where(MarketRule.index_id == index_q.id)
-            ).all()
-
-            if not rules_for_index:
-                context.log.warning(
-                    f"No rules found for index question {index_q.id}"
-                )
-                continue
 
             # Find the most recent batch
             latest_batch = session.exec(
@@ -1406,8 +1320,11 @@ def index_value(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
                 )
                 continue
 
-            # Filter to only rules in the latest batch
-            rules = [r for r in rules_for_index if r.batch_id == latest_batch]
+            rules = session.exec(
+                select(MarketRule)
+                .where(MarketRule.index_id == index_q.id)
+                .where(MarketRule.batch_id == latest_batch)
+            ).all()
 
             if not rules:
                 context.log.warning(
@@ -1415,134 +1332,74 @@ def index_value(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
                 )
                 continue
 
-            # Extract rule metadata
-            rule_ids = [r.id for r in rules]
-            rule_strength_weights = [r.strength_weight for r in rules]
-            rule_relevance_weights = [r.relevance_weight for r in rules]
-            rule_avg_weights = [
-                (s + r) / 2
-                for s, r in zip(
-                    rule_strength_weights, rule_relevance_weights, strict=False
-                )
-            ]
+            # Parse all rule formulas and collect referenced market IDs
+            all_market_ids: set[str] = set()
+            rule_formulas: list[tuple[MarketRule, Formula]] = []
 
-            # Get all markets linked to these rules
-            market_links_by_rule = {}
-            all_market_ids = set()
             for rule in rules:
-                market_ids = list(session.exec(
-                    select(MarketRuleLink.market_id)
-                    .where(MarketRuleLink.rule_id == rule.id)
-                ))
-                market_links_by_rule[rule.id] = market_ids
-                all_market_ids.update(market_ids)
+                try:
+                    raw_rule = json.loads(rule.rule)
+                    adapter = TypeAdapter(Formula)
+                    formula = adapter.validate_python(raw_rule)
+                    rule_formulas.append((rule, formula))
+                    all_market_ids.update(extract_literals_from_formula(formula))
+                except Exception as e:
+                    context.log.warning(f"Failed to parse rule {rule.id}: {e}")
+                    continue
 
-            unique_literals = list(all_market_ids)
-
-            # Build probability time series
-            end_date = datetime.now(UTC)
-            start_date = end_date - timedelta(days=60)
-            time_index = pd.date_range(
-                start=start_date, end=end_date, freq='1h'
-            )
-
-            df_probs = pd.DataFrame(
-                index=time_index, columns=unique_literals, dtype=float
-            )
-
-            for market_id in unique_literals:
-                df_probs[market_id] = get_market_prob_series(
-                    session, market_id, start_date, end_date
+            if not rule_formulas:
+                context.log.warning(
+                    f"No valid rules after parsing for index question {index_q.id}"
                 )
-                context.log.info(
-                    f"Loaded probability series for market {market_id}"
-                )
+                continue
 
-            # Compute Gaussian copula correlation
-            # Replace missing values and transform to latent Gaussian space
-            df_probs_clean = df_probs.replace(-1, np.nan)
-            latent_vars = df_probs_clean.apply(norm.ppf)
+            # Fetch current probabilities from most recent bet for each market
+            market_probs: dict[str, float] = {}
+            for market_id in all_market_ids:
+                latest_prob = session.exec(
+                    select(MarketBet.prob_after)
+                    .where(MarketBet.contract_id == market_id)
+                    .order_by(MarketBet.created_time.desc())
+                    .limit(1)
+                ).first()
+                if latest_prob is not None:
+                    market_probs[market_id] = latest_prob
+                else:
+                    context.log.warning(
+                        f"No bets found for market {market_id}, defaulting to 0.5"
+                    )
+                    market_probs[market_id] = 0.5
 
-            # Compute correlation matrix (minimum 10 overlapping points)
-            corr_df = latent_vars.corr(min_periods=10).fillna(0)
-            corr_matrix = corr_df.values
-
-            # Get current thresholds from most recent probabilities
-            thresholds_dict = {}
-            for market_id in unique_literals:
-                series = df_probs[market_id].dropna()
-                thresholds_dict[market_id] = series.iloc[-1]
-
-            # Prepare for simulation
-            dim = len(unique_literals)
-            thresholds = np.array([
-                norm.ppf(np.clip(thresholds_dict.get(lit), 1e-6, 1 - 1e-6))
-                for lit in unique_literals
-            ])
-
-            # Ensure correlation matrix is positive semi-definite
-            eps = 1e-3
-            eigvals, eigvecs = np.linalg.eigh(corr_matrix)
-            eigvals_clipped = np.clip(eigvals, eps, None)
-            corr_psd = eigvecs @ np.diag(eigvals_clipped) @ eigvecs.T
-
-            # Run Monte Carlo simulation
-            # Sample 10,000 correlated normal vectors
-            z_samples = np.random.multivariate_normal(
-                mean=np.zeros(dim), cov=corr_psd, size=10000
-            )
-            # Convert to binary outcomes based on thresholds
-            bool_samples = (z_samples < thresholds).astype(bool)
-
-            # Normalize rule weights (guard against zero sum)
-            weights = np.array(rule_avg_weights, dtype=float)
-            weight_sum = weights.sum()
+            # Compute normalized rule weights (average of strength and relevance)
+            rule_avg_weights = [
+                ((r.strength_weight or 0.0) + (r.relevance_weight or 0.0)) / 2
+                for r, _ in rule_formulas
+            ]
+            weight_sum = sum(rule_avg_weights)
 
             if weight_sum == 0:
                 context.log.warning(
                     f"All rule weights are zero for index question {index_q.id}. "
                     "Falling back to uniform weights."
                 )
-                norm_weights = np.ones_like(weights) / len(weights)
+                norm_weights = [1.0 / len(rule_formulas)] * len(rule_formulas)
             else:
-                norm_weights = weights / weight_sum
+                norm_weights = [w / weight_sum for w in rule_avg_weights]
 
-            # Evaluate rules across simulations
-            market_index_map = {
-                name: idx for idx, name in enumerate(unique_literals)
-            }
-            n_simulations = bool_samples.shape[0]
-            rule_indicator_matrix = np.zeros((n_simulations, len(rules)))
+                # Evaluate each rule's probability and compute weighted average
+            risk_index = 0.0
+            for i, (rule, formula) in enumerate(rule_formulas):
+                rule_prob = eval_formula_prob(formula, market_probs)
+                risk_index += norm_weights[i] * rule_prob
+                context.log.debug(
+                    f"Rule {rule.id}: prob={rule_prob:.4f}, "
+                    f"weight={norm_weights[i]:.4f}"
+                )
 
-            for i, rule in enumerate(rules):
-                try:
-                    raw_rule = rule.rule
-                    raw_rule = json.loads(raw_rule)
-                    adapter = TypeAdapter(Formula)
-                    formula = adapter.validate_python(raw_rule)
-                except Exception as e:
-                    context.log.warning(f"Failed to parse rule {rule.id}: {e}")
-                    continue
-
-                for j in range(n_simulations):
-                    world_row = bool_samples[j]
-                    try:
-                        rule_result = eval_formula(
-                            formula, world_row, market_index_map
-                        )
-                        rule_indicator_matrix[j, i] = float(rule_result)
-                    except Exception as e:
-                        context.log.warning(
-                            f"Error evaluating rule {rule.id} on simulation {j}: {e}"
-                        )
-
-            # Calculate weighted risk index
-            scores = rule_indicator_matrix @ norm_weights
-            risk_index = scores.mean()
 
             # Build JSON summary
             rules_json = []
-            for rule in rules:
+            for rule, _ in rule_formulas:
                 rules_json.append({
                     "id": rule.id,
                     "readable_rule": rule.readable_rule,
@@ -1562,7 +1419,7 @@ def index_value(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
 
             json_rep = {
                 "index_probability": risk_index,
-                "market_ids_in_rules": list(unique_literals),
+                "market_ids_in_rules": list(all_market_ids),
                 "rules": rules_json
             }
 
@@ -1578,19 +1435,11 @@ def index_value(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
             context.log.info("Added index")
 
             # Link index to its constituent rules
-            for rule_id in rule_ids:
-                rule_obj = session.exec(
-                    select(MarketRule).where(MarketRule.id == rule_id)
-                ).first()
-
-                if rule_obj:
-                    new_link = IndexRuleLink(
-                        rule_id=rule_obj.id,
-                        index_id=new_index.id,
-                    )
-                    session.add(new_link)
-                else:
-                    context.log.warning(f"Rule not found for ID: {rule_id}")
+            for rule, _ in rule_formulas:
+                session.add(IndexRuleLink(
+                    rule_id=rule.id,
+                    index_id=new_index.id,
+                ))
 
             index_probabilities[index_q.question] = float(risk_index)
             total_indices += 1
