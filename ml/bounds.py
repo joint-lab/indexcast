@@ -34,31 +34,32 @@ def compute_bounds(formula: Formula, marginals: dict[str, float]) -> tuple[float
     """
     variables = list(dict.fromkeys(extract_literals_from_formula(formula)))
     n = len(variables)
-    num_worlds = 1 << n
+    num_outcomes = 1 << n
 
-    assignments = list(itertools.product([False, True], repeat=n))
+    # Enumerate all outcomes in {0,1}^n
+    outcomes = list(itertools.product([False, True], repeat=n))
 
-    # Objective: c[w] = 1 if the formula is true for world w
-    c = np.zeros(num_worlds)
-    for w_idx, bits in enumerate(assignments):
-        asgn = dict(zip(variables, bits, strict=True))
-        if eval_formula_on_assignment(formula, asgn):
-            c[w_idx] = 1.0
+    # Objective: c[k] = 1 if the formula is true under outcome k
+    c = np.zeros(num_outcomes)
+    for k, bits in enumerate(outcomes):
+        omega = dict(zip(variables, bits, strict=True))
+        if eval_formula_on_assignment(formula, omega):
+            c[k] = 1.0
 
     # Equality constraints: sum(p) = 1, and marginal for each variable
-    a_eq = np.zeros((1 + n, num_worlds))
+    a_eq = np.zeros((1 + n, num_outcomes))
     b_eq = np.zeros(1 + n)
 
     a_eq[0, :] = 1.0
     b_eq[0] = 1.0
 
     for i, var in enumerate(variables):
-        for w_idx, bits in enumerate(assignments):
+        for k, bits in enumerate(outcomes):
             if bits[i]:
-                a_eq[i + 1, w_idx] = 1.0
+                a_eq[i + 1, k] = 1.0
         b_eq[i + 1] = marginals[var]
 
-    bounds = [(0, None)] * num_worlds
+    bounds = [(0, None)] * num_outcomes
 
     res_min = linprog(c, A_eq=a_eq, b_eq=b_eq, bounds=bounds, method="highs")
     lower = float(res_min.fun)
