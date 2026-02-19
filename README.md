@@ -10,6 +10,7 @@ We focus on health emergencies and major global events.
 * `models`: SQL models for the database.
 * `pipelines`: Dagster pipelines for data scrapping and processing.
 * `notebooks`: Python notebooks used for testing some methodology of this project.
+* `tests`: Unit tests.
 
 # Getting started
 
@@ -24,6 +25,12 @@ To setup environment variables, copy `example_configuration.sh` to `configuratio
 cp example_configuration.sh configuration.sh
 nano configuration.sh
 source configuration.sh
+```
+
+# Testing
+
+```bash
+uv run pytest
 ```
 
 # Acknowledgments

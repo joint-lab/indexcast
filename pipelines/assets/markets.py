@@ -22,18 +22,20 @@ from sqlmodel import Session, select
 
 from ml.clients import get_client
 from ml.dspy_market_scorer import DSPyMarketScorer
+from ml.formula import (
+    Formula,
+    OperatorNode,
+    VariableNode,
+    extract_literals_from_formula,
+    stringify_formula,
+)
 from ml.lm_initial_labeler import get_initial_label, get_initial_labeling_prompt
 from ml.ranker import IndexInformation, get_prompt, get_relevance
 from ml.rules import (
-    Formula,
-    OperatorNode,
     PromptInformation,
-    VariableNode,
-    extract_literals_from_formula,
     get_rules,
     get_rules_prompt,
     get_weight,
-    stringify_formula,
 )
 from models.markets import (
     Index,
