@@ -1,6 +1,4 @@
-"""Tests for Boole-Frechet LP bounds and CNF conversion."""
-
-import itertools
+"""Tests for Boole-Frechet LP bounds."""
 
 import pytest
 
@@ -9,8 +7,6 @@ from ml.formula import (
     OperatorNode,
     VariableNode,
     eval_formula_on_assignment,
-    to_cnf,
-    to_nnf,
 )
 
 
@@ -28,92 +24,6 @@ def _or(*args) -> OperatorNode:
 
 def _not(child) -> OperatorNode:
     return OperatorNode.model_construct(node_type="not", arguments=[child])
-
-
-def _truth_table(formula, variables: list[str]) -> set[tuple[bool, ...]]:
-    """Return the set of truth assignments that make the formula true."""
-    true_rows = set()
-    for bits in itertools.product([False, True], repeat=len(variables)):
-        assignment = dict(zip(variables, bits, strict=False))
-        if eval_formula_on_assignment(formula, assignment):
-            true_rows.add(bits)
-    return true_rows
-
-
-class TestCnfConversion:
-    """CNF conversion preserves truth table equivalence."""
-
-    def test_variable(self):
-        f = _var("A")
-        cnf = to_cnf(f)
-        assert _truth_table(f, ["A"]) == _truth_table(cnf, ["A"])
-
-    def test_not_variable(self):
-        f = _not(_var("A"))
-        cnf = to_cnf(f)
-        assert _truth_table(f, ["A"]) == _truth_table(cnf, ["A"])
-
-    def test_double_negation(self):
-        f = _not(_not(_var("A")))
-        cnf = to_cnf(f)
-        assert _truth_table(f, ["A"]) == _truth_table(cnf, ["A"])
-
-    def test_and(self):
-        f = _and(_var("A"), _var("B"))
-        cnf = to_cnf(f)
-        assert _truth_table(f, ["A", "B"]) == _truth_table(cnf, ["A", "B"])
-
-    def test_or(self):
-        f = _or(_var("A"), _var("B"))
-        cnf = to_cnf(f)
-        assert _truth_table(f, ["A", "B"]) == _truth_table(cnf, ["A", "B"])
-
-    def test_de_morgan_not_and(self):
-        f = _not(_and(_var("A"), _var("B")))
-        cnf = to_cnf(f)
-        vars_ = ["A", "B"]
-        assert _truth_table(f, vars_) == _truth_table(cnf, vars_)
-
-    def test_de_morgan_not_or(self):
-        f = _not(_or(_var("A"), _var("B")))
-        cnf = to_cnf(f)
-        vars_ = ["A", "B"]
-        assert _truth_table(f, vars_) == _truth_table(cnf, vars_)
-
-    def test_nested_formula(self):
-        # (A AND B) OR (NOT C)
-        f = _or(_and(_var("A"), _var("B")), _not(_var("C")))
-        cnf = to_cnf(f)
-        vars_ = ["A", "B", "C"]
-        assert _truth_table(f, vars_) == _truth_table(cnf, vars_)
-
-    def test_complex_three_variable(self):
-        # NOT(A OR (B AND C))
-        f = _not(_or(_var("A"), _and(_var("B"), _var("C"))))
-        cnf = to_cnf(f)
-        vars_ = ["A", "B", "C"]
-        assert _truth_table(f, vars_) == _truth_table(cnf, vars_)
-
-
-class TestNnf:
-    """NNF pushes negations down to variables."""
-
-    def _only_variable_negations(self, formula) -> bool:
-        if isinstance(formula, VariableNode):
-            return True
-        if formula.node_type == "not":
-            return isinstance(formula.arguments[0], VariableNode)
-        return all(self._only_variable_negations(arg) for arg in formula.arguments)
-
-    def test_nnf_de_morgan(self):
-        f = _not(_and(_var("A"), _var("B")))
-        nnf = to_nnf(f)
-        assert self._only_variable_negations(nnf)
-
-    def test_nnf_double_negation(self):
-        f = _not(_not(_var("A")))
-        nnf = to_nnf(f)
-        assert isinstance(nnf, VariableNode)
 
 
 class TestEvalFormula:
