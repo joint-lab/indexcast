@@ -1,20 +1,18 @@
-"""Tests for ml/bounds.py — CNF conversion and Boole-Frechet LP bounds."""
+"""Tests for Boole-Frechet LP bounds and CNF conversion."""
 
 import itertools
 
 import pytest
 
-from ml.bounds import (
-    compute_bounds,
+from ml.bounds import compute_bounds
+from ml.formula import (
+    OperatorNode,
+    VariableNode,
     eval_formula_on_assignment,
     to_cnf,
     to_nnf,
 )
-from ml.rules import OperatorNode, VariableNode
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _var(name: str) -> VariableNode:
     return VariableNode(var=name)
@@ -41,10 +39,6 @@ def _truth_table(formula, variables: list[str]) -> set[tuple[bool, ...]]:
             true_rows.add(bits)
     return true_rows
 
-
-# ---------------------------------------------------------------------------
-# CNF conversion — truth table equivalence
-# ---------------------------------------------------------------------------
 
 class TestCnfConversion:
     """CNF conversion preserves truth table equivalence."""
@@ -101,15 +95,10 @@ class TestCnfConversion:
         assert _truth_table(f, vars_) == _truth_table(cnf, vars_)
 
 
-# ---------------------------------------------------------------------------
-# NNF — NOTs only on variables
-# ---------------------------------------------------------------------------
-
 class TestNnf:
     """NNF pushes negations down to variables."""
 
     def _only_variable_negations(self, formula) -> bool:
-        """Return True if NOT only appears directly on VariableNodes."""
         if isinstance(formula, VariableNode):
             return True
         if formula.node_type == "not":
@@ -127,12 +116,7 @@ class TestNnf:
         assert isinstance(nnf, VariableNode)
 
 
-# ---------------------------------------------------------------------------
-# eval_formula_on_assignment
-# ---------------------------------------------------------------------------
-
 class TestEvalFormula:
-    """eval_formula_on_assignment evaluates correctly."""
 
     def test_variable_true(self):
         assert eval_formula_on_assignment(_var("X"), {"X": True}) is True
@@ -154,10 +138,6 @@ class TestEvalFormula:
         assert eval_formula_on_assignment(f, {"A": True, "B": False}) is True
 
 
-# ---------------------------------------------------------------------------
-# Boole-Frechet bounds — known analytical results
-# ---------------------------------------------------------------------------
-
 class TestComputeBounds:
     """compute_bounds produces correct Frechet bounds."""
 
@@ -176,21 +156,18 @@ class TestComputeBounds:
         assert hi == pytest.approx(1.0, abs=1e-8)
 
     def test_not_exact(self):
-        # NOT A is exact: 1 - P(A)
         f = _not(_var("A"))
         lo, hi = compute_bounds(f, {"A": 0.6})
         assert lo == pytest.approx(0.4, abs=1e-8)
         assert hi == pytest.approx(0.4, abs=1e-8)
 
     def test_single_variable(self):
-        # P(A) is exact.
         f = _var("A")
         lo, hi = compute_bounds(f, {"A": 0.5})
         assert lo == pytest.approx(0.5, abs=1e-8)
         assert hi == pytest.approx(0.5, abs=1e-8)
 
     def test_tautology_and_contradiction(self):
-        # A OR NOT A is always true.
         f = _or(_var("A"), _not(_var("A")))
         lo, hi = compute_bounds(f, {"A": 0.3})
         assert lo == pytest.approx(1.0, abs=1e-8)
