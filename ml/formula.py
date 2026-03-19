@@ -124,16 +124,21 @@ def validate_market_ids(rule: Formula, allowed_ids: set[str]):
 # =============================================================================
 
 
-def stringify_formula(f: Formula) -> str:
+def stringify_formula(
+    f: Formula,
+    market_questions: dict[str, str] | None = None,
+) -> str:
     """Human-readable display of a formula."""
     if f.node_type == "variable":
+        if market_questions and f.var in market_questions:
+            return market_questions[f.var]
         return f"[VAR: {f.var}]"
 
     if f.node_type == "not":
-        return f"NOT ({stringify_formula(f.arguments[0])})"
+        return f"NOT ({stringify_formula(f.arguments[0], market_questions)})"
 
     # AND / OR
-    children = [stringify_formula(a) for a in f.arguments]
+    children = [stringify_formula(a, market_questions) for a in f.arguments]
     op = f.node_type.upper()
     return f" {op} ".join(f"({c})" for c in children)
 
