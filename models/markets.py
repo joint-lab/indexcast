@@ -379,7 +379,7 @@ class MarketRule(SQLModel, table=True):
 # Indexcast index
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 class Index(SQLModel, table=True):
-    """Monte Carlo simulation results for H5N1 outbreak probability."""
+    """Calculated index probability with upper and lower bounds."""
 
     __tablename__ = "index"
 

@@ -371,10 +371,10 @@ def get_text_rep(market: Market) -> str:
     """
     title = market.question
     # Limit description length to avoid token overflow
-    description = market.description[:4875]
+    description = (market.description or "")[:4875]
 
     # Fetch content from URLs in the description for additional context
-    urls = extract_urls(market.description)
+    urls = extract_urls(market.description or "")
     url_text = ""
     if len(urls) > 0:
         for url in urls:
@@ -532,7 +532,7 @@ def market_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
             # Skip non-binary or resolved markets
             if (market.outcome_type != "BINARY"
                     or market.resolution is not None
-                    or market.closed_time < now):
+                    or (market.closed_time is not None and market.closed_time < now)):
                 context.log.info(
                     f"Skipping market {market.id}: invalid type/resolved."
                 )
@@ -559,7 +559,7 @@ def market_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
 
             # Skip DSPy if none-of-the-above
             if labels == [-1]:
-                results.append((market.id, [], []))
+                results.append((market.id, []))
                 continue
 
             market_label_rows = []
@@ -926,8 +926,6 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
 
     This asset updates the is_eligible flag on market-label associations based
     on minimum quality thresholds:
-    - Must be a BINARY outcome type
-    - Must not be resolved or closed
     - Must have volume >= 400
     - Must have >= 20 unique traders
 
@@ -996,11 +994,6 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
             m_id = label.market_id
             volume_score = score_lookup.get((m_id, volume_score_type_id))
             trades_score = score_lookup.get((m_id, traders_score_type_id))
-
-            # Fetch market outcome type
-            market = session.exec(
-                select(Market).where(Market.id == m_id)
-            ).first()
 
             # Check eligibility criteria
             is_eligible = True
