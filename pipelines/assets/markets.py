@@ -528,11 +528,12 @@ def market_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
         # Process each market
         for market in markets_to_process:
             context.log.debug(f"Processing market {market.id}")
-
             # Skip non-binary or resolved markets
+
             if (market.outcome_type != "BINARY"
                     or market.resolution is not None
-                    or (market.closed_time is not None and market.closed_time < now)):
+                    or (market.closed_time is not None
+                        and market.closed_time.replace(tzinfo=UTC) < now)):
                 context.log.info(
                     f"Skipping market {market.id}: invalid type/resolved."
                 )
@@ -961,6 +962,15 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
 
         market_ids = list(set(label.market_id for label in market_labels))
 
+        # Fetch Market objects for binary/resolved/closed checks
+        now = datetime.now(UTC)
+        markets_by_id = {
+            m.id: m
+            for m in session.exec(
+                select(Market).where(Market.id.in_(market_ids))
+            ).all()
+        }
+
         # Score type IDs for eligibility checks
         question_score_type_id = MarketRelevanceScoreType.INDEX_QUESTION_RELEVANCE.value
         volume_score_type_id = MarketRelevanceScoreType.VOLUME_TOTAL.value
@@ -997,7 +1007,15 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
 
             # Check eligibility criteria
             is_eligible = True
-            if volume_score is None or volume_score < volume_threshold:
+            market = markets_by_id.get(m_id)
+            if market is not None and (
+                market.outcome_type != "BINARY"
+                or market.resolution is not None
+                or (market.closed_time is not None
+                    and market.closed_time.replace(tzinfo=UTC) < now)
+            ):
+                is_eligible = False
+            elif volume_score is None or volume_score < volume_threshold:
                 is_eligible = False
             elif trades_score is None or trades_score < traders_threshold:
                 is_eligible = False
