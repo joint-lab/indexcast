@@ -371,10 +371,10 @@ def get_text_rep(market: Market) -> str:
     """
     title = market.question
     # Limit description length to avoid token overflow
-    description = (market.description or "")[:4875]
+    description = market.description[:4875]
 
     # Fetch content from URLs in the description for additional context
-    urls = extract_urls(market.description or "")
+    urls = extract_urls(market.description)
     url_text = ""
     if len(urls) > 0:
         for url in urls:
@@ -499,7 +499,7 @@ def market_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
     now = datetime.now(UTC)
     client = get_client()
 
-    with (Session(context.resources.database_engine) as session):
+    with Session(context.resources.database_engine) as session:
         # Find markets needing classification
         subquery = select(MarketPipelineEvent.market_id).where(
             MarketPipelineEvent.stage_id == PipelineStageType.CLASSIFIED
@@ -962,14 +962,6 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
 
         market_ids = list(set(label.market_id for label in market_labels))
 
-        # Fetch Market objects for binary/resolved/closed checks
-        now = datetime.now(UTC)
-        markets_by_id = {
-            m.id: m
-            for m in session.exec(
-                select(Market).where(Market.id.in_(market_ids))
-            ).all()
-        }
 
         # Score type IDs for eligibility checks
         question_score_type_id = MarketRelevanceScoreType.INDEX_QUESTION_RELEVANCE.value
@@ -999,15 +991,20 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
         traders_threshold = 20
         num_labels_marked_ineligible = 0
         num_labels_restored = 0
+        now = datetime.now(UTC)
 
         for label in market_labels:
             m_id = label.market_id
             volume_score = score_lookup.get((m_id, volume_score_type_id))
             trades_score = score_lookup.get((m_id, traders_score_type_id))
 
+            # Fetch market outcome type
+            market = session.exec(
+                select(Market).where(Market.id == m_id)
+            ).first()
+
             # Check eligibility criteria
             is_eligible = True
-            market = markets_by_id.get(m_id)
             if market is not None and (
                 market.outcome_type != "BINARY"
                 or market.resolution is not None
