@@ -20,6 +20,7 @@ from pydantic import TypeAdapter
 from sqlalchemy import delete, func
 from sqlmodel import Session, select
 
+from ml.bounds import compute_bounds
 from ml.clients import get_client
 from ml.dspy_market_scorer import DSPyMarketScorer
 from ml.formula import (
@@ -527,9 +528,12 @@ def market_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
         # Process each market
         for market in markets_to_process:
             context.log.debug(f"Processing market {market.id}")
-
             # Skip non-binary or resolved markets
-            if market.outcome_type != "BINARY" or market.resolution is not None:
+
+            if (market.outcome_type != "BINARY"
+                    or market.resolution is not None
+                    or (market.closed_time is not None
+                        and market.closed_time.replace(tzinfo=UTC) < now)):
                 context.log.info(
                     f"Skipping market {market.id}: invalid type/resolved."
                 )
@@ -556,7 +560,7 @@ def market_labels(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
 
             # Skip DSPy if none-of-the-above
             if labels == [-1]:
-                results.append((market.id, [], []))
+                results.append((market.id, []))
                 continue
 
             market_label_rows = []
@@ -750,7 +754,7 @@ def manifold_full_markets(context: dg.AssetExecutionContext) -> dg.MaterializeRe
             session.bulk_save_objects(to_insert)
             total_bets_updated += len(all_bets)
 
-            # Track pipeline event
+            # Track pipeline event (always update timestamp on re-runs)
             existing_event = session.exec(
                 select(MarketPipelineEvent).where(
                     (MarketPipelineEvent.market_id == m) &
@@ -758,7 +762,9 @@ def manifold_full_markets(context: dg.AssetExecutionContext) -> dg.MaterializeRe
                 )
             ).first()
 
-            if not existing_event:
+            if existing_event:
+                existing_event.completed_at = datetime.now(UTC)
+            else:
                 session.add(
                     MarketPipelineEvent(
                         market_id=m,
@@ -921,10 +927,11 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
 
     This asset updates the is_eligible flag on market-label associations based
     on minimum quality thresholds:
-    - Must be a BINARY outcome type
-    - Must have volume >= 200
-    - Must have >= 11 unique traders
-    - Must have question relevance score >= 0.6
+    - Must have volume >= 400
+    - Must have >= 20 unique traders
+    - Must be type BINARY
+    - Must not be resolved
+    - Must not be closed
 
     Labels that don't meet these criteria are marked as ineligible. Labels that
     were previously ineligible but now meet criteria are restored to eligible.
@@ -959,11 +966,10 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
         market_ids = list(set(label.market_id for label in market_labels))
 
         # Score type IDs for eligibility checks
-        question_score_type_id = MarketRelevanceScoreType.INDEX_QUESTION_RELEVANCE.value
         volume_score_type_id = MarketRelevanceScoreType.VOLUME_TOTAL.value
         traders_score_type_id = MarketRelevanceScoreType.NUM_TRADERS.value
         score_type_ids_set = {
-            question_score_type_id, volume_score_type_id, traders_score_type_id
+            volume_score_type_id, traders_score_type_id
         }
 
         # Fetch all relevant scores
@@ -982,14 +988,14 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
         }
 
         # Eligibility thresholds
-        volume_threshold = 500
+        volume_threshold = 400
         traders_threshold = 20
         num_labels_marked_ineligible = 0
         num_labels_restored = 0
+        now = datetime.now(UTC)
 
         for label in market_labels:
             m_id = label.market_id
-            question_score = score_lookup.get((m_id, question_score_type_id))
             volume_score = score_lookup.get((m_id, volume_score_type_id))
             trades_score = score_lookup.get((m_id, traders_score_type_id))
 
@@ -1000,13 +1006,16 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
 
             # Check eligibility criteria
             is_eligible = True
-            if market.outcome_type != "BINARY":
+            if market is None or (
+                    market.outcome_type != "BINARY"
+                    or market.resolution is not None
+                    or (market.closed_time is not None
+                        and market.closed_time.replace(tzinfo=UTC) < now)
+            ):
                 is_eligible = False
             elif volume_score is None or volume_score < volume_threshold:
                 is_eligible = False
             elif trades_score is None or trades_score < traders_threshold:
-                is_eligible = False
-            elif question_score is None or question_score < 0.6:
                 is_eligible = False
 
             # Update eligibility
@@ -1127,10 +1136,15 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
 
             used_markets = set()
 
+            # Build market ID -> question mapping for readable rules
+            market_questions = {
+                mid: info["question"] for mid, info in market_data.items()
+            }
+
             # Score and store each rule
             for rule_obj in logical_rules:
                 rule_json = rule_obj.rule.model_dump_json()
-                readable = stringify_formula(rule_obj.rule)
+                readable = stringify_formula(rule_obj.rule, market_questions)
 
                 index_info = IndexInformation(
                     todays_date=datetime.now(UTC),
@@ -1390,11 +1404,20 @@ def index_value(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
 
                 # Evaluate each rule's probability and compute weighted average
             risk_index = 0.0
+            weighted_lower = 0.0
+            weighted_upper = 0.0
             for i, (rule, formula) in enumerate(rule_formulas):
                 rule_prob = eval_formula_prob(formula, market_probs)
                 risk_index += norm_weights[i] * rule_prob
+
+                # Compute Boole-Frechet bounds for this rule
+                rule_lower, rule_upper = compute_bounds(formula, market_probs)
+                weighted_lower += norm_weights[i] * rule_lower
+                weighted_upper += norm_weights[i] * rule_upper
+
                 context.log.debug(
                     f"Rule {rule.id}: prob={rule_prob:.4f}, "
+                    f"bounds=[{rule_lower:.4f}, {rule_upper:.4f}], "
                     f"weight={norm_weights[i]:.4f}"
                 )
 
@@ -1421,6 +1444,8 @@ def index_value(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
 
             json_rep = {
                 "index_probability": risk_index,
+                "upper_probability": weighted_upper,
+                "lower_probability": weighted_lower,
                 "market_ids_in_rules": list(all_market_ids),
                 "rules": rules_json
             }
@@ -1428,6 +1453,8 @@ def index_value(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
             # Store index result
             new_index = Index(
                 index_probability=float(risk_index),
+                upper_probability=float(weighted_upper),
+                lower_probability=float(weighted_lower),
                 index_question_id=str(index_q.id),
                 created_at=datetime.now(UTC),
                 json_representation=json.dumps(json_rep)

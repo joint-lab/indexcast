@@ -379,12 +379,18 @@ class MarketRule(SQLModel, table=True):
 # Indexcast index
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 class Index(SQLModel, table=True):
-    """Monte Carlo simulation results for H5N1 outbreak probability."""
+    """Calculated index probability with upper and lower bounds."""
 
     __tablename__ = "index"
 
     id: int = Field(primary_key=True)
-    index_probability: float = Field(description="Calculated probability of H5N1 outbreak")
+    index_probability: float = Field(description="Calculated index probability")
+    upper_probability: float | None = Field(
+        default=None, description="Upper bound from Boole-Frechet bounds"
+    )
+    lower_probability: float | None = Field(
+        default=None, description="Lower bound from Boole-Frechet bounds"
+    )
     index_question_id: str = Field(foreign_key="index_questions.id")
     json_representation: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
