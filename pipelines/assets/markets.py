@@ -929,6 +929,9 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
     on minimum quality thresholds:
     - Must have volume >= 400
     - Must have >= 20 unique traders
+    - Must be type BINARY
+    - Must not be resolved
+    - Must not be closed
 
     Labels that don't meet these criteria are marked as ineligible. Labels that
     were previously ineligible but now meet criteria are restored to eligible.
@@ -962,13 +965,11 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
 
         market_ids = list(set(label.market_id for label in market_labels))
 
-
         # Score type IDs for eligibility checks
-        question_score_type_id = MarketRelevanceScoreType.INDEX_QUESTION_RELEVANCE.value
         volume_score_type_id = MarketRelevanceScoreType.VOLUME_TOTAL.value
         traders_score_type_id = MarketRelevanceScoreType.NUM_TRADERS.value
         score_type_ids_set = {
-            question_score_type_id, volume_score_type_id, traders_score_type_id
+            volume_score_type_id, traders_score_type_id
         }
 
         # Fetch all relevant scores
@@ -1005,11 +1006,11 @@ def market_rule_eligibility_labels(context: dg.AssetExecutionContext) -> dg.Mate
 
             # Check eligibility criteria
             is_eligible = True
-            if market is not None and (
-                market.outcome_type != "BINARY"
-                or market.resolution is not None
-                or (market.closed_time is not None
-                    and market.closed_time.replace(tzinfo=UTC) < now)
+            if market is None or (
+                    market.outcome_type != "BINARY"
+                    or market.resolution is not None
+                    or (market.closed_time is not None
+                        and market.closed_time.replace(tzinfo=UTC) < now)
             ):
                 is_eligible = False
             elif volume_score is None or volume_score < volume_threshold:
