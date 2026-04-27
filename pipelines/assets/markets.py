@@ -1161,6 +1161,13 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
                 rule_markets = extract_literals_from_formula(rule_obj.rule)
                 market_metrics = {}
 
+                # Only include the metrics that the relevance prompt expects
+                allowed_metric_names = {
+                    MarketRelevanceScoreType.INDEX_QUESTION_RELEVANCE.relevance_score,
+                    MarketRelevanceScoreType.VOLUME_TOTAL.relevance_score,
+                    MarketRelevanceScoreType.NUM_TRADERS.relevance_score,
+                }
+
                 for mid in rule_markets:
                     used_markets.add(mid)
                     scores = session.exec(
@@ -1170,6 +1177,7 @@ def index_rules(context: dg.AssetExecutionContext) -> dg.MaterializeResult:
                     market_metrics[mid] = {
                         sc.score_type.relevance_score: sc.score_value
                         for sc in scores
+                        if sc.score_type.relevance_score in allowed_metric_names
                     }
 
                 # Build metrics text for relevance scoring
